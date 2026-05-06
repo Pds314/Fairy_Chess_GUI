@@ -1,0 +1,17 @@
+# Fairy Chess Pieces Configuration
+# Extended set of magical pieces for fairy chess variants
+# Format: Display Name / Texture Names / Characters / Moveset / Properties;
+
+# Standard pieces
+Knight / knight, horse / N / +x / p;
+Rook / rook, castle, tower / R / +*,+*Ou / p;
+Bishop / bishop, elephant / B / x* / p;
+King / king, mann, lord / K / +,x,<>+E_<>+E_ou / R;
+Queen / queen, lady / Q / +*,x* / p;
+Pawn / pawn, soldier / P / ^x!~i,^+_i,^+_^+e_iu / P;
+
+# Fairy pieces
+Camel / camel, beast / C / 2+x / p;
+Zebra / zebra, striped / Z / 3+x / p;
+Nightrider / nightrider, super_knight / H / +x* / p;
+Amazon / amazon, superqueen / M / +*,x*,+x / p;

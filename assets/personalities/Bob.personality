@@ -1,0 +1,10 @@
+# Bob: all-in king hunter. Cranks every swarming knob to eleven and adds
+# gravity on top. Tends to throw pieces at the enemy king and hope.
+
+name: Bob
+engine: pst
+
+multiplicative_swarm: 0.25
+additive_swarm: 1.5
+gravity_bonus: 2.0
+huddle_bonus: 0.0        # don't defend, attack

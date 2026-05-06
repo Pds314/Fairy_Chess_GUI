@@ -1,0 +1,13 @@
+# Geoff: PST engine tuned for maximizing everything except the PST
+# PST engine trying to become perfection
+
+name: Geoff
+engine: pst
+
+future_mobility_discount: 0.9
+mobility_weight: 0.5
+piece_intrinsic_weight: 0.8
+gravity_bonus: 1.5
+additive_swarm: 3.0
+multiplicative_swarm: 0.2
+huddle_bonus: 1.0

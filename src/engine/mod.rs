@@ -1,0 +1,54 @@
+// src/engine/mod.rs
+
+pub mod analysis;
+pub mod api;
+pub mod control_engine;
+pub mod diffusion_engine;
+pub mod evaluator;
+pub mod flow_engine;
+pub mod gravity_engine;
+pub mod influence_engine; // <-- New
+pub mod mcts_engine;
+pub mod outpost_engine;
+pub mod pressure_engine;
+pub mod probabilistic_search_engine;
+pub mod pst_engine;
+pub mod pure_policy_engine;
+pub mod random_engine;
+pub mod search;
+pub mod simple_engine;
+pub mod static_scoring_engine;
+pub mod swarm_engine;
+pub mod tactical_engine;
+pub mod territory_engine;
+pub mod vanguard_engine; // <-- New
+
+pub mod game_controller;
+pub mod parameters;
+pub mod personality;
+pub mod registry;
+
+pub use api::{ChessEngine, Evaluation, SearchParams, SearchResult};
+pub use control_engine::ControlEngine;
+pub use diffusion_engine::DiffusionEngine;
+pub use flow_engine::FlowEngine;
+pub use gravity_engine::GravityEngine;
+pub use influence_engine::InfluenceEngine; // <-- New
+pub use mcts_engine::MctsEngine;
+pub use outpost_engine::OutpostEngine;
+pub use pressure_engine::PressureEngine;
+pub use probabilistic_search_engine::ProbabilisticSearchEngine;
+pub use pst_engine::PstEngine;
+pub use pure_policy_engine::PurePolicyEngine;
+pub use random_engine::RandomEngine;
+pub use simple_engine::SimpleEngine;
+pub use static_scoring_engine::StaticScoringEngine;
+pub use swarm_engine::SwarmEngine;
+pub use tactical_engine::TacticalEngine;
+pub use territory_engine::TerritoryEngine;
+pub use vanguard_engine::VanguardEngine; // <-- New
+
+pub use analysis::MoveEvaluation;
+pub use game_controller::GameController;
+pub use parameters::{EngineParameters, ParameterDef, ParameterizedEngine};
+pub use registry::EngineType;

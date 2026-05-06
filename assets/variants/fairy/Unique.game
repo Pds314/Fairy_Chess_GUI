@@ -1,0 +1,11 @@
+# Unique Fairy Chess - nested folder example
+# Demonstrates loading pieces from multiple files
+position: oncdkmzu/pppppppp/8/8/8/8/8/8/PPPPPPPP/ONCDKMZU
+turn: white
+fifty_move: 0
+
+# Load pieces from multiple files (one from parent, one local)
+pieces_files: ../Fairy.pieces, Unique.pieces
+
+# Promotion zones
+promotion_zones: white:rank:0;black:rank:9

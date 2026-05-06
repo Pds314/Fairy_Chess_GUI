@@ -1,0 +1,11 @@
+# Fairy Chess Game Configuration
+# Example with magical pieces
+position: rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR
+turn: white
+fifty_move: 0
+
+# Load fairy pieces
+pieces_files: Fairy.pieces
+
+# Promotion zones
+promotion_zones: white:rank:0;black:rank:7

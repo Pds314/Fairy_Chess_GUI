@@ -1,0 +1,15 @@
+#build artifacts
+/target/
+
+#Source backups
+**/*.rs.bk
+
+#Editor/FS
+.directory
+*.kate-swp
+*.swp
+*swo
+*~
+
+#scripts
+*.sh

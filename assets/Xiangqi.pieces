@@ -1,0 +1,20 @@
+# 1. General (King) - 1 step orthogonally.
+General / general, king / K / +[palace], ^+* !{K} / R;
+
+# 2. Advisor (Guard) - 1 step diagonally.
+Advisor / advisor, guard / A / x[palace] / ;
+
+# 3. Elephant (Minister) - Exactly 2 steps diagonally, blocked by pieces.
+Elephant / elephant, minister / E / x_=x[own_side] / ;
+
+# 4. Horse (Knight) - 1 step orthogonally, then 1 step diagonally.
+Horse / horse, knight / H / +_x / ;
+
+# 5. Chariot (Rook) - Slides orthogonally.
+Chariot / chariot, rook / R / +* / ;
+
+# 6. Cannon (Pao)
+Cannon / cannon / C / +*_ _, +!@* =+*_ ! / ;
+
+# 7. Soldier (Pawn) - 1 step forward. Promotes.
+Soldier / soldier, pawn / S / ^+, <>+[other_side] / P;

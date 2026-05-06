@@ -1,0 +1,8 @@
+# Compounds.pieces
+# Format: Display Name / Texture Names / Characters / Moveset / Properties;
+
+Queen / queen, lady / Q / +*,x* / p;
+Empress / empress, chancellor, knook, lady, queen / E / +x,+* / p;
+Princess / princess, archbishop, hawk, lady, queen / A / +x,x* / p;
+Centaur / centaur, mann, king, knight, horse / C / +x,x,+ / p;
+Amazon / amazon, queen, empress, princess, chancellor, archbishop, lady / M / +x,+*,x* / p;

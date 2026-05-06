@@ -1,0 +1,17 @@
+# Board setup (9 columns, 10 rows).
+# Red (White) starts at the bottom, Black at the top.
+position: rheakaehr/9/1c5c1/s1s1s1s1s/9/9/S1S1S1S1S/1C5C1/9/RHEAKAEHR
+turn: white
+
+# Load the custom piece logic
+pieces_files: Xiangqi.pieces
+
+# The River
+zone: palace:   white:rect:7:9:3:5; black:rect:0:2:3:5
+zone: own_side: white:rect:5:9:0:8; black:rect:0:4:0:8
+zone: other_side: white:rect:0:4:0:8; black:rect:5:9:0:8
+
+# Red (White) crosses into rows 0-4. Black crosses into rows 5-9.
+
+# Dead Positions
+insufficient_material: K vs K; K vs KA; K vs KE; K vs KAA; K vs KEE; KA vs KA; KE vs KE

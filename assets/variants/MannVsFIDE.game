@@ -1,0 +1,18 @@
+# FIDE Standard Chess Game Configuration
+# Standard chess configuration
+position: rnbqkbnr/pppppppp/8/8/8/8/MMMMMMMM/MMMMKMMM
+turn: white
+fifty_move: 0
+
+# Piece configuration files to load (can specify multiple, comma-separated)
+pieces_files: ../StraightLeapers.pieces, FIDE.pieces
+
+# Promotion zones
+# Format: color:zone_type:parameters
+# Standard chess: pawns promote on the opposite end rank
+promotion_zones: white:rank:0;black:rank:7
+
+# Alternative examples:
+# promotion_zones: white:rank:0,rank:1;black:rank:7,rank:6
+# promotion_zones: white:rect:0:1:0:7;black:rect:6:7:0:7
+# promotion_zones: white:square:0:3,square:0:4;black:file:0

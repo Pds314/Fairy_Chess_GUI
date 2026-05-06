@@ -1,0 +1,16 @@
+# Flan: PST engine that attacks from where you don't expect.
+# PST engine trying to become perfection
+
+name: Flan
+engine: pst
+
+future_mobility_discount: 0.5
+mobility_weight: 1.1
+piece_intrinsic_weight: 0.9
+gravity_bonus: -1.0
+additive_swarm: 1.5
+multiplicative_swarm: 0.5
+promotion_dampener: 0.65
+midgame_structural_factor: 0.7
+
+

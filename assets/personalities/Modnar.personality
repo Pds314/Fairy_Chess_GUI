@@ -1,0 +1,8 @@
+# Modnar is a random move agent so you can pit them vs another random move agent.
+# PST engine trying to become perfection
+
+name: Modnar
+engine: random
+
+
+

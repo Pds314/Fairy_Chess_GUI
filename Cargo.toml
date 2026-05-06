@@ -1,0 +1,15 @@
+# Cargo.toml
+[package]
+name = "fairy_chess_gui"
+version = "1.0.6"
+edition = "2024"
+authors = ["Peter Smythe <Pds3.14@gmail.com>"]
+repository = ""
+license = "MIT"
+
+
+[dependencies]
+iced = { version = "0.13.1", features = ["canvas", "tokio", "image", "wgpu"] }
+rand = "0.9.1"
+chrono = "0.4"
+smallvec = "1.11"

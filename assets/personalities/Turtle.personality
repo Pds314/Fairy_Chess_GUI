@@ -1,0 +1,10 @@
+# Turtle: pressure engine that only cares about holding the center.
+# Tiny zones, huge edge penalty, doesn't fight over contested squares.
+
+name: Turtle
+engine: pressure
+
+zone_size: 2
+control_weight: 2.5
+contested_bonus: 0.0
+edge_penalty: 0.9

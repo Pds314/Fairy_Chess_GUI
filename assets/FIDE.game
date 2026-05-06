@@ -1,0 +1,29 @@
+# FIDE Standard Chess Game Configuration
+# Standard chess configuration
+position: rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR
+turn: white
+fifty_move: 0
+
+# Piece configuration files to load (can specify multiple, comma-separated)
+pieces_files: FIDE.pieces
+
+# Promotion zones
+# Format: color:zone_type:parameters
+# Standard chess: pawns promote on the opposite end rank
+promotion_zones: white:rank:0;black:rank:7
+
+# Alternative examples:
+# promotion_zones: white:rank:0,rank:1;black:rank:7,rank:6
+# promotion_zones: white:rect:0:1:0:7;black:rect:6:7:0:7
+# promotion_zones: white:square:0:3,square:0:4;black:file:0
+
+# These will show up in natural positions.
+insufficient_material: K vs K
+insufficient_material: K vs KB
+insufficient_material: K vs KN
+
+# Artificial positions with no King on one side but a King on the other are not draws.
+# However unlikely, the King could capture all enemy pieces, since they have no royal powers.
+# Positions with only multiple Kings are always drawn but I don't want to list them out.
+# Positions with multiple Kings on one side against a piece that is not a King on the other are not insufficient material draws.
+# The Kings can be forked or pinned.

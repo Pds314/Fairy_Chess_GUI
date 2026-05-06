@@ -1,0 +1,11 @@
+# Krab: PST engine tuned for high performance.
+# PST engine trying to become perfection
+
+name: Krab
+engine: pst
+
+future_mobility_discount: 0.8
+mobility_weight: 1.0
+piece_intrinsic_weight: 1.4
+gravity_bonus: 0.1
+additive_swarm: 0.3

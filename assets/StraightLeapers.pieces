@@ -1,0 +1,9 @@
+# StraightLeapers.pieces
+# Format: Display Name / Texture Names / Characters / Moveset / Properties;
+
+Wazir / wazir, vizier, rook, tower, block, square, circle / W / + / p;
+Ferz / ferz, bishop, elephant, rhombus, diamond, triangle / F / x / p;
+Mann / mann, man, king, commoner / M / +,x / p;
+Dabbaba / dabbaba, wazir, rook, tower, block, square / D / 2+ / p;
+Alfil / alfil, elephant, bishop, ferz, rhombus, diamond, triangle / A / 2x / p;
+Warmachine / warmachine, machine, rook, tower, block, square / W / +,2+ / p;

@@ -1,0 +1,11 @@
+# Alice: PST engine tuned for deep long-term planning.
+# High future discount means she values mobility many moves from now
+# nearly as much as mobility now — she'll develop pieces to squares that
+# are good *eventually* rather than good *immediately*.
+
+name: Alice
+engine: pst
+
+future_mobility_discount: 0.92
+mobility_weight: 0.7
+piece_intrinsic_weight: 0.3

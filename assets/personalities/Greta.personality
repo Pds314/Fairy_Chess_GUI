@@ -1,0 +1,12 @@
+# Greta: pure-policy engine that prioritizes material above all else.
+# SEE weight maxed, positional weights near zero. Grabs everything.
+
+name: Greta
+engine: policy
+
+see_weight: 180.0
+rescue_weight: 120.0
+center_weight: 0.2
+advance_weight: 0.1
+mobility_weight: 0.3
+noise_weight: 0.0        # deterministic grabbing

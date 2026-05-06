@@ -1,0 +1,16 @@
+# Capablanca Chess Game Configuration
+# 10x8 board variant with additional pieces
+position: rnabqkbcnr/pppppppppp/10/10/10/10/PPPPPPPPPP/RNABQKBCNR
+turn: white
+fifty_move: 0
+
+# Piece configuration files to load
+pieces_files: Capablanca.pieces
+
+# Promotion zones
+# Standard chess: pawns promote on the opposite end rank
+promotion_zones: white:rank:0;black:rank:7
+
+insufficient_material: K vs K
+insufficient_material: K vs KB
+insufficient_material: K vs KN

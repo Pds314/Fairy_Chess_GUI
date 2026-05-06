@@ -1,0 +1,6 @@
+# HippogonalLeapers.pieces
+# Format: Display Name / Texture Names / Characters / Moveset / Properties;
+
+Knight / knight, horse / N / +x / p;
+Camel / camel, beast, knight, horse / C / 2+x / p;
+Zebra / zebra, horse, knight / Z / +2x / p;

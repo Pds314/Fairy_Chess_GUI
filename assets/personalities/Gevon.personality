@@ -1,0 +1,13 @@
+# Gevon: PST engine that cares more about the king
+# PST engine trying to become perfection
+
+name: Gevon
+engine: pst
+
+future_mobility_discount: 0.6
+additive_swarm: 1.0
+multiplicative_swarm: 0.25
+promotion_dampener: 0.45
+
+
+

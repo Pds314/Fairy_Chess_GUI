@@ -1,0 +1,6 @@
+# Unique Fairy Pieces - deeply nested example
+# Format: Display Name / Texture Names / Characters / Moveset / Properties;
+
+Unicorn / unicorn, horn / U / x*,^2+x / p;
+Dragon / dragon, fire / D / +*,x*,+x / p;
+Phoenix / phoenix, bird / O / +x,2+x / p;
