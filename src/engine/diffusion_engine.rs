@@ -5,7 +5,7 @@ use crate::core::game_state::{ExpandedMove, GameState};
 use crate::core::piece::{Piece, PieceColor};
 use crate::core::position::Position;
 use crate::engine::api::{ChessEngine, Evaluation, SearchParams, SearchResult};
-use crate::engine::parameters::{EngineParameters, ParameterDef, ParameterizedEngine};
+use crate::engine::parameters::{EngineParameters, ParameterDef};
 use crate::move_generator::MoveGenerator;
 use crate::piece_config::PieceConfigManager;
 use std::collections::HashMap;
@@ -954,28 +954,6 @@ impl DiffusionEngine {
     }
 }
 
-impl ParameterizedEngine for DiffusionEngine {
-    fn parameter_definitions(&self) -> &'static [ParameterDef] {
-        DIFFUSION_PARAMETERS
-    }
-
-    fn get_parameters(&self) -> &EngineParameters {
-        &self.parameters
-    }
-
-    fn set_parameters(&mut self, params: EngineParameters) -> bool {
-        let changed = self.parameters != params;
-        if changed {
-            self.parameters = params;
-        }
-        changed
-    }
-
-    fn on_parameters_changed(&mut self) {
-        // No special reinitialization needed
-    }
-}
-
 impl ChessEngine for DiffusionEngine {
     fn name(&self) -> &str {
         "Diffusion Engine (Probabilistic Future Simulation)"
@@ -1071,14 +1049,18 @@ impl ChessEngine for DiffusionEngine {
     }
 
     fn parameter_definitions(&self) -> Option<&'static [ParameterDef]> {
-        Some(ParameterizedEngine::parameter_definitions(self))
+        Some(DIFFUSION_PARAMETERS)
     }
 
     fn get_parameters(&self) -> Option<EngineParameters> {
-        Some(ParameterizedEngine::get_parameters(self).clone())
+        Some(self.parameters.clone())
     }
 
     fn set_parameters(&mut self, params: EngineParameters) -> bool {
-        ParameterizedEngine::set_parameters(self, params)
+        let changed = self.parameters != params;
+        if changed {
+            self.parameters = params;
+        }
+        changed
     }
 }

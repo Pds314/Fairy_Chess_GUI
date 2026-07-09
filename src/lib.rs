@@ -1,0 +1,30 @@
+pub mod app;
+pub mod asset_manager;
+pub mod attack_table;
+pub mod background;
+pub mod board_config;
+pub mod commands;
+pub mod console;
+pub mod constants;
+pub mod core;
+pub mod drawing;
+pub mod engine;
+pub mod evolution;
+pub mod handlers;
+pub mod helpers;
+pub mod insufficient_material;
+pub mod messages;
+pub mod move_generator;
+pub mod notation;
+pub mod pgn;
+pub mod piece_config;
+pub mod promotion;
+pub mod promotion_dialog;
+pub mod texture_manager;
+pub mod tournament;
+pub mod tournament_graph;
+pub mod ui;
+pub mod zobrist;
+
+// Re-export Message so existing `use crate::Message;` imports continue to work across the crate
+pub use messages::Message;

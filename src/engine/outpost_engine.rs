@@ -1,75 +1,94 @@
 // src/engine/outpost_engine.rs
-use crate::core::GameState;
+//
+// Territory/outpost engine.
+//
+// Fixes: uses the cached `Piece::is_royal`/`is_royalty` flags instead of a
+// `PieceConfigManager` lookup per piece per leaf; uses `Board::piece_count`
+// instead of allocating two `Vec`s just to read `.len()`; persists a
+// transposition table; routes through `run_search`.
+//
+// NOTE: `evaluate_outpost_quality` calls `MoveGenerator::get_attackers_to_square`
+// once per non-royal piece, which walks the whole reverse database. This
+// engine is the single best candidate in the tree for opting into
+// `crate::attack_table` (see `sentinel_engine.rs` for the pattern).
+
 use crate::core::board::Board;
 use crate::core::piece::{Piece, PieceColor};
 use crate::core::position::Position;
-use crate::engine::api::{ChessEngine, Evaluation, SearchParams, SearchResult};
+use crate::core::GameState;
+use crate::engine::api::{ChessEngine, SearchParams, SearchResult};
 use crate::engine::evaluator::EvaluatorTrait;
-use crate::engine::parameters::{EngineParameters, ParameterDef, ParameterizedEngine};
-use crate::engine::search::Search;
+use crate::engine::parameters::{EngineParameters, ParameterDef};
+use crate::engine::search::{combined_params, run_search, TTEntry};
 use crate::move_generator::MoveGenerator;
 use crate::piece_config::PieceConfigManager;
+use std::collections::HashMap;
+use std::sync::OnceLock;
 
-// Parameter IDs
 pub const PARAM_OUTPOST_VALUE: &str = "outpost_value";
 pub const PARAM_SUPPORT_BONUS: &str = "support_bonus";
 pub const PARAM_ENEMY_TERRITORY_MULT: &str = "enemy_territory_mult";
 pub const PARAM_CENTRAL_BONUS: &str = "central_bonus";
+pub const PARAM_MATERIAL_WEIGHT: &str = "outpost_material_weight";
 
-// Parameter definitions
 pub static OUTPOST_PARAMETERS: &[ParameterDef] = &[
     ParameterDef::new(
         PARAM_OUTPOST_VALUE,
         "Outpost Base Value",
         "Base value for pieces in advanced positions. Higher = more aggressive.",
-        0.0,
-        100.0,
-        20.0,
-        1.0,
+        0.0, 100.0, 20.0, 1.0,
     ),
-    ParameterDef::new(
-        PARAM_SUPPORT_BONUS,
-        "Support Bonus",
-        "Bonus for outpost pieces protected by pawns or other pieces.",
-        0.0,
-        50.0,
-        15.0,
-        1.0,
-    ),
-    ParameterDef::new(
-        PARAM_ENEMY_TERRITORY_MULT,
-        "Enemy Territory Multiplier",
-        "Multiplier for pieces deep in enemy territory.",
-        1.0,
-        3.0,
-        1.5,
-        0.1,
-    ),
-    ParameterDef::new(
-        PARAM_CENTRAL_BONUS,
-        "Central Files Bonus",
-        "Extra bonus for outposts in central files.",
-        0.0,
-        30.0,
-        10.0,
-        1.0,
-    ),
+ParameterDef::new(
+    PARAM_SUPPORT_BONUS,
+    "Support Bonus",
+    "Bonus for outpost pieces protected by friendly pieces (capped at 2 supporters).",
+                  0.0, 50.0, 15.0, 1.0,
+),
+ParameterDef::new(
+    PARAM_ENEMY_TERRITORY_MULT,
+    "Enemy Territory Multiplier",
+    "Multiplier for pieces deep in enemy territory.",
+    1.0, 3.0, 1.5, 0.1,
+),
+ParameterDef::new(
+    PARAM_CENTRAL_BONUS,
+    "Central Files Bonus",
+    "Extra bonus for outposts in central files.",
+    0.0, 30.0, 10.0, 1.0,
+),
+ParameterDef::new(
+    PARAM_MATERIAL_WEIGHT,
+    "Material Weight",
+    "Small material component so the engine does not sacrifice everything.",
+    0.0, 1.0, 0.1, 0.01,
+),
 ];
 
-/// Engine that values establishing outposts in enemy territory
 pub struct OutpostEngine {
     parameters: EngineParameters,
+    transposition_table: HashMap<u64, TTEntry>,
 }
 
 impl OutpostEngine {
     pub fn new() -> Self {
+        static MERGED: OnceLock<Vec<ParameterDef>> = OnceLock::new();
         Self {
-            parameters: EngineParameters::from_defaults(OUTPOST_PARAMETERS),
+            parameters: EngineParameters::from_defaults(combined_params(
+                OUTPOST_PARAMETERS,
+                &MERGED,
+            )),
+            transposition_table: HashMap::new(),
         }
     }
+    #[inline]
+    fn p(&self, id: &str, d: f64) -> f64 {
+        self.parameters.get_or_default(id, d)
+    }
+}
 
-    fn get_param(&self, id: &str, default: f64) -> f64 {
-        self.parameters.get_or_default(id, default)
+impl Default for OutpostEngine {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -77,139 +96,107 @@ struct OutpostEvaluator<'a> {
     engine: &'a OutpostEngine,
 }
 
-impl<'a> OutpostEvaluator<'a> {
-    /// Check if a position is an outpost (advanced and relatively safe)
-    fn evaluate_outpost_quality(
+impl OutpostEvaluator<'_> {
+    fn quality(
         &self,
         pos: Position,
         piece: &Piece,
         board: &Board,
         board_size: (usize, usize),
-        move_generator: &MoveGenerator,
+               mg: &MoveGenerator,
     ) -> f64 {
-        let mut quality = 0.0;
+        let (rows, cols) = board_size;
 
-        // How far into enemy territory?
         let advancement = match piece.color {
-            PieceColor::White => (board_size.0 - 1 - pos.0) as f64 / board_size.0 as f64,
-            PieceColor::Black => pos.0 as f64 / board_size.0 as f64,
+            PieceColor::White => (rows - 1 - pos.0) as f64 / rows as f64,
+            PieceColor::Black => pos.0 as f64 / rows as f64,
         };
-
-        // Only consider positions in enemy half
         if advancement < 0.5 {
             return 0.0;
         }
 
-        let base_value = self.engine.get_param(PARAM_OUTPOST_VALUE, 20.0);
-        quality += base_value * (advancement - 0.5) * 2.0; // Scale from 0 at midfield to full value at back rank
+        let mut quality = self.engine.p(PARAM_OUTPOST_VALUE, 20.0) * (advancement - 0.5) * 2.0;
 
-        // Check if supported by friendly pieces
-        let support_bonus = self.engine.get_param(PARAM_SUPPORT_BONUS, 15.0);
-        let supporters = move_generator.get_attackers_to_square(board, pos, piece.color);
-        quality += support_bonus * (supporters.len() as f64).min(2.0); // Cap at 2 supporters
+        // Friendly pieces that can reach this square = supporters.
+        let supporters = mg.get_attackers_to_square(board, pos, piece.color);
+        quality += self.engine.p(PARAM_SUPPORT_BONUS, 15.0) * (supporters.len() as f64).min(2.0);
 
-        // Check if in enemy territory (past 6th rank for white, past 3rd for black)
-        let deep_advancement = match piece.color {
+        let deep = match piece.color {
             PieceColor::White => pos.0 <= 2,
-            PieceColor::Black => pos.0 >= board_size.0 - 3,
+            PieceColor::Black => pos.0 + 3 >= rows,
         };
-
-        if deep_advancement {
-            let territory_mult = self.engine.get_param(PARAM_ENEMY_TERRITORY_MULT, 1.5);
-            quality *= territory_mult;
+        if deep {
+            quality *= self.engine.p(PARAM_ENEMY_TERRITORY_MULT, 1.5);
         }
 
-        // Bonus for central files
-        let center_col = board_size.1 / 2;
+        let center_col = cols / 2;
         let col_distance = (pos.1 as i32 - center_col as i32).abs();
         if col_distance <= 1 {
-            let central_bonus = self.engine.get_param(PARAM_CENTRAL_BONUS, 10.0);
-            quality += central_bonus * (2.0 - col_distance as f64) / 2.0;
+            quality += self.engine.p(PARAM_CENTRAL_BONUS, 10.0) * (2.0 - col_distance as f64) / 2.0;
         }
 
         quality
     }
 }
 
-impl<'a> EvaluatorTrait for OutpostEvaluator<'a> {
+impl EvaluatorTrait for OutpostEvaluator<'_> {
     fn evaluate(
         &self,
         state: &mut GameState,
-        move_generator: &MoveGenerator,
-        config_manager: &PieceConfigManager,
+        mg: &MoveGenerator,
+        _cm: &PieceConfigManager,
     ) -> i32 {
-        let my_color = state.current_turn;
-        let enemy_color = my_color.opposite();
-        let board_size = state.board.size();
+        let me = state.current_turn;
+        let them = me.opposite();
+        let b = &state.board;
+        let size = b.size();
+        let (rows, cols) = size;
 
-        let mut my_outpost_score = 0.0;
-        let mut enemy_outpost_score = 0.0;
+        let mut mine = 0.0f64;
+        let mut theirs = 0.0f64;
 
-        // Evaluate outposts for both sides
-        for (pos, piece) in state.board.get_pieces_by_color(my_color) {
-            // Skip pawns and royalty from outpost consideration
-            if let Some(piece_config) = config_manager.get_piece_by_index(piece.piece_type) {
-                if piece_config.properties.is_royal || piece_config.properties.is_royalty {
+        for r in 0..rows {
+            for c in 0..cols {
+                let Some(p) = b.get_piece((r, c)) else { continue };
+                // `Piece` caches both flags precisely so the hot path never
+                // touches the config manager.
+                if p.is_royal || p.is_royalty {
                     continue;
                 }
-                // You might want to check if it's a pawn and skip those too
-            }
-
-            my_outpost_score += self.evaluate_outpost_quality(
-                pos,
-                &piece,
-                &state.board,
-                board_size,
-                move_generator,
-            );
-        }
-
-        for (pos, piece) in state.board.get_pieces_by_color(enemy_color) {
-            if let Some(piece_config) = config_manager.get_piece_by_index(piece.piece_type) {
-                if piece_config.properties.is_royal || piece_config.properties.is_royalty {
-                    continue;
+                let q = self.quality((r, c), &p, b, size, mg);
+                if p.color == me {
+                    mine += q;
+                } else {
+                    theirs += q;
                 }
             }
-
-            enemy_outpost_score += self.evaluate_outpost_quality(
-                pos,
-                &piece,
-                &state.board,
-                board_size,
-                move_generator,
-            );
         }
 
-        // Add a small material component to avoid sacrificing everything
-        let material_weight = 0.1;
-        let my_material = state.board.get_pieces_by_color(my_color).len() as f64;
-        let enemy_material = state.board.get_pieces_by_color(enemy_color).len() as f64;
-        let material_diff = (my_material - enemy_material) * 100.0 * material_weight;
+        // Board maintains piece counts incrementally; the old code allocated
+        // two Vecs per leaf just to call `.len()`.
+        let mw = self.engine.p(PARAM_MATERIAL_WEIGHT, 0.1);
+        let material_diff =
+        (b.piece_count(me) as f64 - b.piece_count(them) as f64) * 100.0 * mw;
 
-        // Return combined score
-        ((my_outpost_score - enemy_outpost_score + material_diff) * 10.0) as i32
-    }
-}
-
-impl ParameterizedEngine for OutpostEngine {
-    fn parameter_definitions(&self) -> &'static [ParameterDef] {
-        OUTPOST_PARAMETERS
+        ((mine - theirs + material_diff) * 10.0) as i32
     }
 
-    fn get_parameters(&self) -> &EngineParameters {
-        &self.parameters
+    fn get_piece_value_on_square(
+        &self,
+        _p: &Piece,
+        _s: Position,
+        _cm: &PieceConfigManager,
+    ) -> i32 {
+        100
     }
-
-    fn set_parameters(&mut self, params: EngineParameters) -> bool {
-        let changed = self.parameters != params;
-        if changed {
-            self.parameters = params;
-        }
-        changed
+    fn delta_pruning_margin(&self) -> i32 {
+        1500
     }
-
-    fn on_parameters_changed(&mut self) {
-        // No special reinitialization needed
+    fn aspiration_window(&self) -> i32 {
+        300
+    }
+    fn contempt(&self) -> i32 {
+        50
     }
 }
 
@@ -218,57 +205,35 @@ impl ChessEngine for OutpostEngine {
         "Outpost Engine (Territory Control)"
     }
 
+    fn reset_cache(&mut self) {
+        self.transposition_table.clear();
+    }
+
     fn best_move(&mut self, params: SearchParams) -> Option<SearchResult> {
-        let evaluator = OutpostEvaluator { engine: self };
-        let mut search = Search::new(&evaluator);
-        let depth = if params.depth > 0 { params.depth } else { 3 };
-
-        let (best_move, evaluation, depth_reached) = if let Some(time_limit) = params.time_limit {
-            search.find_best_move_iterative(
-                params.state,
-                params.move_generator,
-                params.config_manager,
-                depth,
-                time_limit,
-            )?
-        } else {
-            search.find_best_move_with_depth(
-                params.state,
-                params.move_generator,
-                params.config_manager,
-                depth,
-            )?
+        let mut tt = std::mem::take(&mut self.transposition_table);
+        let result = {
+            let ev = OutpostEvaluator { engine: &*self };
+            run_search(&ev, params, &self.parameters, &mut tt, 3)
         };
-
-        let mate_in = if evaluation >= 999000 {
-            Some(((999999 - evaluation) / 2) as i32)
-        } else if evaluation <= -999000 {
-            Some(-((-999999 - evaluation) / 2) as i32)
-        } else {
-            None
-        };
-
-        Some(SearchResult {
-            best_move,
-            evaluation: Evaluation {
-                score: evaluation,
-                mate_in,
-            },
-            depth_reached,
-        })
+        self.transposition_table = tt;
+        result
     }
 
     fn stop(&mut self) {}
 
     fn parameter_definitions(&self) -> Option<&'static [ParameterDef]> {
-        Some(ParameterizedEngine::parameter_definitions(self))
+        static MERGED: OnceLock<Vec<ParameterDef>> = OnceLock::new();
+        Some(combined_params(OUTPOST_PARAMETERS, &MERGED))
     }
-
     fn get_parameters(&self) -> Option<EngineParameters> {
-        Some(ParameterizedEngine::get_parameters(self).clone())
+        Some(self.parameters.clone())
     }
-
-    fn set_parameters(&mut self, params: EngineParameters) -> bool {
-        ParameterizedEngine::set_parameters(self, params)
+    fn set_parameters(&mut self, p: EngineParameters) -> bool {
+        let changed = self.parameters != p;
+        if changed {
+            self.parameters = p;
+            self.transposition_table.clear();
+        }
+        changed
     }
 }

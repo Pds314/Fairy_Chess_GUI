@@ -1,0 +1,6 @@
+name: KA2
+base: Influence
+king_attack_weight: 2.0
+promotion_influence: 0.03
+search_multiplicative_eval: 1.0
+search_relative_history: 1.0

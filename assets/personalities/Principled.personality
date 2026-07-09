@@ -1,0 +1,9 @@
+name: Principled
+base: Influence
+material_weight: 100.0
+territory_weight: 18.0
+threat_weight: 0.35
+control_sharpness: 1.35
+base_influence: 0.3
+royal_value_factor: 10.0
+tempo_bonus: 10.0

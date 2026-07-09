@@ -2,7 +2,7 @@
 
 use crate::core::game_state::{ExpandedMove, GameState};
 use crate::engine::api::{ChessEngine, Evaluation, SearchParams, SearchResult};
-use crate::engine::parameters::{EngineParameters, ParameterDef, ParameterizedEngine};
+use crate::engine::parameters::{EngineParameters, ParameterDef};
 use crate::engine::pst_engine::PstEngine;
 use crate::move_generator::MoveGenerator;
 use crate::piece_config::PieceConfigManager;
@@ -287,23 +287,6 @@ impl MctsEngine {
     }
 }
 
-impl ParameterizedEngine for MctsEngine {
-    fn parameter_definitions(&self) -> &'static [ParameterDef] {
-        MCTS_PARAMETERS
-    }
-    fn get_parameters(&self) -> &EngineParameters {
-        &self.parameters
-    }
-    fn set_parameters(&mut self, params: EngineParameters) -> bool {
-        let changed = self.parameters != params;
-        if changed {
-            self.parameters = params;
-        }
-        changed
-    }
-    fn on_parameters_changed(&mut self) {}
-}
-
 impl ChessEngine for MctsEngine {
     fn name(&self) -> &str {
         "MCTS Engine (Temperature Tree Search)"
@@ -335,15 +318,19 @@ impl ChessEngine for MctsEngine {
     }
 
     fn parameter_definitions(&self) -> Option<&'static [ParameterDef]> {
-        Some(ParameterizedEngine::parameter_definitions(self))
+        Some(MCTS_PARAMETERS)
     }
 
     fn get_parameters(&self) -> Option<EngineParameters> {
-        Some(ParameterizedEngine::get_parameters(self).clone())
+        Some(self.parameters.clone())
     }
 
     fn set_parameters(&mut self, params: EngineParameters) -> bool {
-        ParameterizedEngine::set_parameters(self, params)
+        let changed = self.parameters != params;
+        if changed {
+            self.parameters = params;
+        }
+        changed
     }
 
     fn analyze_position(

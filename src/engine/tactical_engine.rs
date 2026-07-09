@@ -1,9 +1,16 @@
 // src/engine/tactical_engine.rs
-use crate::core::GameState;
+//
+// Priority engine: mate > check > capture > close on the enemy royals.
+//
+// Rewritten to do exactly ONE make/unmake per candidate move. The previous
+// version cloned the entire `GameState` three times per candidate (once for
+// the mate probe, once for the check probe, once for the distance probe) and
+// located royal pieces by scanning the board and consulting the
+// `PieceConfigManager`. `Board` tracks royal/royalty positions incrementally.
+
 use crate::core::game_state::{ExpandedMove, MateStatus};
+use crate::core::{GameState, PieceColor, Position};
 use crate::engine::api::{ChessEngine, Evaluation, SearchParams, SearchResult};
-use crate::move_generator::MoveGenerator;
-use crate::piece_config::PieceConfigManager;
 
 pub struct TacticalEngine;
 
@@ -11,76 +18,67 @@ impl TacticalEngine {
     pub fn new() -> Self {
         TacticalEngine
     }
+}
 
-    fn is_checkmate_move(
-        &self,
-        state: &GameState,
-        mv: &ExpandedMove,
-        move_generator: &MoveGenerator,
-        config_manager: &PieceConfigManager,
-    ) -> bool {
-        let mut test_state = state.clone();
-        test_state.execute_expanded_move(mv, move_generator, config_manager);
-        matches!(
-            test_state.get_mate_status(move_generator, config_manager),
-            MateStatus::Checkmate
-        )
+impl Default for TacticalEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Probe {
+    mate: bool,
+    check: bool,
+    dist: f64,
+}
+
+fn result_of(mv: &ExpandedMove, score: i32, mate_in: Option<i32>) -> SearchResult {
+    SearchResult {
+        best_move: mv.clone(),
+        evaluation: Evaluation { score, mate_in },
+        depth_reached: 1,
+    }
+}
+
+/// Royal + royalty squares, straight out of `Board`'s incremental lists.
+fn protected_of(state: &GameState, color: PieceColor) -> Vec<Position> {
+    let b = &state.board;
+    let mut v = b.get_royal_positions(color).to_vec();
+    v.extend_from_slice(b.get_royalty_positions(color));
+    v
+}
+
+/// Total squared distance from our pieces to the enemy royal centroid.
+/// Called with the board in the *post-move* state, so `state.current_turn`
+/// is the opponent.
+fn distance_score(state: &GameState) -> f64 {
+    let enemy = state.current_turn;
+    let ours = enemy.opposite();
+
+    let royals = protected_of(state, enemy);
+    if royals.is_empty() {
+        return f64::MAX;
     }
 
-    fn gives_check(
-        &self,
-        state: &GameState,
-        mv: &ExpandedMove,
-        move_generator: &MoveGenerator,
-        config_manager: &PieceConfigManager,
-    ) -> bool {
-        let mut test_state = state.clone();
-        test_state.execute_expanded_move(mv, move_generator, config_manager);
-        test_state.is_in_check(move_generator, config_manager)
-    }
+    let n = royals.len() as f64;
+    let ar = royals.iter().map(|p| p.0 as f64).sum::<f64>() / n;
+    let ac = royals.iter().map(|p| p.1 as f64).sum::<f64>() / n;
 
-    fn calculate_distance_score(
-        &self,
-        state: &GameState,
-        mv: &ExpandedMove,
-        move_generator: &MoveGenerator,
-        config_manager: &PieceConfigManager,
-    ) -> f64 {
-        let mut test_state = state.clone();
-        test_state.execute_expanded_move(mv, move_generator, config_manager);
-
-        let enemy_color = test_state.current_turn;
-        let enemy_pieces = test_state.board.get_pieces_by_color(enemy_color);
-
-        let mut royal_positions = Vec::new();
-        for (pos, piece) in enemy_pieces {
-            if let Some(piece_config) = config_manager.get_piece_by_index(piece.piece_type) {
-                if piece_config.properties.is_royal || piece_config.properties.is_royalty {
-                    royal_positions.push(pos);
+    let (rows, cols) = state.board.size();
+    let mut total = 0.0;
+    for r in 0..rows {
+        for c in 0..cols {
+            if let Some(p) = state.board.get_piece((r, c)) {
+                if p.color == ours {
+                    let dr = r as f64 - ar;
+                    let dc = c as f64 - ac;
+                    total += dr * dr + dc * dc;
                 }
             }
         }
-
-        if royal_positions.is_empty() {
-            return f64::MAX;
-        }
-
-        let avg_row =
-            royal_positions.iter().map(|p| p.0 as f64).sum::<f64>() / royal_positions.len() as f64;
-        let avg_col =
-            royal_positions.iter().map(|p| p.1 as f64).sum::<f64>() / royal_positions.len() as f64;
-
-        let our_color = test_state.current_turn.opposite();
-        let our_pieces = test_state.board.get_pieces_by_color(our_color);
-        let mut total_distance = 0.0;
-        for (pos, _) in our_pieces {
-            let row_diff = pos.0 as f64 - avg_row;
-            let col_diff = pos.1 as f64 - avg_col;
-            total_distance += row_diff * row_diff + col_diff * col_diff;
-        }
-
-        total_distance
     }
+    total
 }
 
 impl ChessEngine for TacticalEngine {
@@ -89,95 +87,56 @@ impl ChessEngine for TacticalEngine {
     }
 
     fn best_move(&mut self, params: SearchParams) -> Option<SearchResult> {
-        let legal_moves = params
-            .state
-            .get_legal_moves(params.move_generator, params.config_manager);
-        if legal_moves.is_empty() {
+        let SearchParams {
+            state,
+            move_generator,
+            config_manager,
+            ..
+        } = params;
+
+        let legal = state.get_legal_moves(move_generator, config_manager);
+        if legal.is_empty() {
             return None;
         }
 
-        // Priority 1: Check for mate in 1
-        for mv in &legal_moves {
-            if self.is_checkmate_move(
-                params.state,
-                mv,
-                params.move_generator,
-                params.config_manager,
-            ) {
-                return Some(SearchResult {
-                    best_move: mv.clone(), // <-- FIX
-                    evaluation: Evaluation {
-                        score: 999999,
-                        mate_in: Some(1),
-                    },
-                    depth_reached: 1,
-                });
-            }
-        }
-
-        // Priority 2: Check for moves that give check
-        for mv in &legal_moves {
-            if self.gives_check(
-                params.state,
-                mv,
-                params.move_generator,
-                params.config_manager,
-            ) {
-                return Some(SearchResult {
-                    best_move: mv.clone(), // <-- FIX
-                    evaluation: Evaluation {
-                        score: 1000,
-                        mate_in: None,
-                    },
-                    depth_reached: 1,
-                });
-            }
-        }
-
-        // Priority 3: Check for captures
-        for mv in &legal_moves {
-            if mv.captures.is_some() {
-                return Some(SearchResult {
-                    best_move: mv.clone(), // <-- FIX
-                    evaluation: Evaluation {
-                        score: 500,
-                        mate_in: None,
-                    },
-                    depth_reached: 1,
-                });
-            }
-        }
-
-        // Priority 4: Choose move that minimizes distance to enemy royals
-        let mut best_move = &legal_moves[0];
-        let mut best_distance = self.calculate_distance_score(
-            params.state,
-            best_move,
-            params.move_generator,
-            params.config_manager,
-        );
-
-        for mv in &legal_moves[1..] {
-            let distance = self.calculate_distance_score(
-                params.state,
-                mv,
-                params.move_generator,
-                params.config_manager,
+        let mut probes: Vec<Probe> = Vec::with_capacity(legal.len());
+        for mv in &legal {
+            state.execute_expanded_move(mv, move_generator, config_manager);
+            let mate = matches!(
+                state.get_mate_status(move_generator, config_manager),
+                                MateStatus::Checkmate
             );
-            if distance < best_distance {
-                best_distance = distance;
-                best_move = mv;
-            }
+            let check = !mate && state.is_in_check_fast(move_generator);
+            let dist = distance_score(state);
+            state.undo_move(config_manager);
+            probes.push(Probe { mate, check, dist });
         }
 
-        Some(SearchResult {
-            best_move: best_move.clone(), // <-- FIX
-            evaluation: Evaluation {
-                score: -(best_distance as i32),
-                mate_in: None,
-            },
-            depth_reached: 1,
-        })
+        if let Some(i) = probes.iter().position(|p| p.mate) {
+            return Some(result_of(&legal[i], 999_999, Some(1)));
+        }
+        if let Some(i) = probes.iter().position(|p| p.check) {
+            return Some(result_of(&legal[i], 1000, None));
+        }
+        if let Some(i) = legal.iter().position(|m| m.captures.is_some()) {
+            return Some(result_of(&legal[i], 500, None));
+        }
+
+        let (i, best) = probes
+        .iter()
+        .enumerate()
+        .min_by(|a, b| {
+            a.1.dist
+            .partial_cmp(&b.1.dist)
+            .unwrap_or(std::cmp::Ordering::Equal)
+        })?;
+
+        let score = if best.dist.is_finite() && best.dist < i32::MAX as f64 {
+            -(best.dist as i32)
+        } else {
+            0
+        };
+        Some(result_of(&legal[i], score, None))
     }
 
     fn stop(&mut self) {}

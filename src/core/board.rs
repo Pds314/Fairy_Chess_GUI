@@ -1,38 +1,32 @@
 // src/core/board.rs
+use crate::core::ghost::Ghost;
 use crate::core::piece::{Piece, PieceColor};
 use crate::core::position::Position;
 use crate::piece_config::PieceConfigManager;
-use crate::zobrist::{ZOBRIST_PIECES, get_zobrist_piece_index, piece_square_key};
+use crate::zobrist::{get_zobrist_piece_index, piece_square_key, ZOBRIST_PIECES};
 use smallvec::SmallVec;
 use std::fmt;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EnPassantTarget {
-    pub position: Position,
-    pub capturable_by_all: bool,
-    pub piece_position: Position,
-}
 
 #[derive(Clone)]
 pub struct Board {
     // FLATTENED 1D ARRAY for maximum cache-hit performance
     squares: Vec<Option<Piece>>,
     size: (usize, usize),
-    en_passant_targets: Vec<EnPassantTarget>,
 
-    /// Positions of pieces with the 'R' (is_royal) flag. Each is
-    /// individually protected by check rules. Typically 0–2 per side.
+    /// Append-only ghost stack. The **live** set is `ghosts[ghost_live_start..]`
+    /// — the ghosts created by the most recent transaction. Undo is
+    /// `truncate(ghost_live_start)` followed by restoring the previous
+    /// `ghost_live_start` from the frame. No `born_ply`, no `lifetime`, no
+    /// per-ply `Vec` clone.
+    ///
+    /// Everything *below* `ghost_live_start` is expired but retained, so that
+    /// `GameState::ghosts_of(i)` can reconstruct any still-on-the-path move's
+    /// ghosts purely from the frame chain.
+    ghosts: Vec<Ghost>,
+    ghost_live_start: u32,
+
     royal_positions: [SmallVec<[Position; 2]>; 2],
-
-    /// Positions of pieces with the 'r' (is_royalty) flag. Collectively
-    /// protected: when this list has exactly one entry, that piece is
-    /// treated as royal (see GameState::is_in_check_fast). Variants may
-    /// have several per side, hence the larger inline capacity.
     royalty_positions: [SmallVec<[Position; 4]>; 2],
-
-    /// Total piece count per color. Used for O(1) extinction detection
-    /// in variants with no royal pieces, where losing all pieces is a
-    /// loss condition (not stalemate).
     piece_counts: [u32; 2],
 
     piece_hash: u64,
@@ -41,10 +35,11 @@ pub struct Board {
 impl fmt::Debug for Board {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Board")
-            .field("size", &self.size)
-            .field("piece_hash", &self.piece_hash)
-            .field("piece_counts", &self.piece_counts)
-            .finish()
+        .field("size", &self.size)
+        .field("piece_hash", &self.piece_hash)
+        .field("piece_counts", &self.piece_counts)
+        .field("live_ghosts", &self.live_ghosts().len())
+        .finish()
     }
 }
 
@@ -54,7 +49,8 @@ impl Board {
         Board {
             squares,
             size,
-            en_passant_targets: Vec::new(),
+            ghosts: Vec::new(),
+            ghost_live_start: 0,
             royal_positions: [SmallVec::new(), SmallVec::new()],
             royalty_positions: [SmallVec::new(), SmallVec::new()],
             piece_counts: [0, 0],
@@ -83,18 +79,84 @@ impl Board {
         self.piece_hash ^= piece_square_key(piece.color, piece.piece_type, pos);
     }
 
+    // ─── Ghosts ─────────────────────────────────────────────────────────
+
+    /// The ghosts created by the most recent transaction. Simultaneously the
+    /// 0-ply set (castling transit assertions) and the 1-ply set (en-passant
+    /// capture aliases). A multi-move-turn variant would look one extra frame
+    /// back rather than introduce a counter.
+    #[inline(always)]
+    pub fn live_ghosts(&self) -> &[Ghost] {
+        &self.ghosts[self.ghost_live_start as usize..]
+    }
+
+    /// The live ghost on `pos`, of *any* flavour — including a bare transit
+    /// ghost with no capture alias.
+    #[inline]
+    pub fn ghost_at(&self, pos: Position) -> Option<&Ghost> {
+        self.live_ghosts().iter().find(|g| g.square() == pos)
+    }
+
+    /// Every ghost still on the current search path, expired ones included.
+    /// Diagnostic; `GameState::ghosts_of` slices it.
+    #[inline]
+    pub fn all_ghosts(&self) -> &[Ghost] {
+        &self.ghosts
+    }
+    #[inline]
+    pub fn ghost_len(&self) -> usize {
+        self.ghosts.len()
+    }
+    /// Index of the first live ghost.
+    #[inline]
+    pub fn ghost_epoch(&self) -> u32 {
+        self.ghost_live_start
+    }
+
+    /// Open a new ghost epoch. Returns the previous `ghost_live_start`, which
+    /// the caller stores in the frame. Everything already on the stack
+    /// silently expires.
+    #[inline]
+    pub(crate) fn begin_ghost_epoch(&mut self) -> u32 {
+        let prev = self.ghost_live_start;
+        self.ghost_live_start = self.ghosts.len() as u32;
+        prev
+    }
+
+    #[inline]
+    pub(crate) fn push_ghost(&mut self, g: Ghost) {
+        self.ghosts.push(g);
+    }
+
+    /// Undo. Drops exactly the ghosts pushed since `begin_ghost_epoch`, then
+    /// re-exposes the previous epoch.
+    #[inline]
+    pub(crate) fn rewind_ghosts(&mut self, prev_live_start: u32) {
+        self.ghosts.truncate(self.ghost_live_start as usize);
+        self.ghost_live_start = prev_live_start;
+    }
+
+    pub fn clear_ghosts(&mut self) {
+        self.ghosts.clear();
+        self.ghost_live_start = 0;
+    }
+
+    /// Seed a ghost into the initial position (e.g. a FEN en-passant square).
+    pub fn seed_ghost(&mut self, g: Ghost) {
+        debug_assert_eq!(self.ghost_live_start, 0, "seed ghosts before the first move");
+        self.ghosts.push(g);
+    }
+
     // ─── Royal ('R') position tracking ─────────────────────────────────
 
     #[inline]
     pub fn get_royal_positions(&self, color: PieceColor) -> &[Position] {
         &self.royal_positions[color.index()]
     }
-
     #[inline]
     fn royal_remove(&mut self, color: PieceColor, pos: Position) {
         self.royal_positions[color.index()].retain(|p| *p != pos);
     }
-
     #[inline]
     fn royal_add(&mut self, color: PieceColor, pos: Position) {
         let list = &mut self.royal_positions[color.index()];
@@ -103,33 +165,20 @@ impl Board {
         }
     }
 
-    #[inline]
-    fn royal_update(&mut self, color: PieceColor, old: Position, new: Position) {
-        let list = &mut self.royal_positions[color.index()];
-        if let Some(slot) = list.iter_mut().find(|p| **p == old) {
-            *slot = new;
-        }
-    }
-
     // ─── Royalty ('r') position tracking ───────────────────────────────
-    // Mirrors the royal tracking. When royalty_positions[color].len() == 1,
-    // that piece is dynamically treated as royal by GameState's check logic.
 
     #[inline]
     pub fn get_royalty_positions(&self, color: PieceColor) -> &[Position] {
         &self.royalty_positions[color.index()]
     }
-
     #[inline]
     pub fn royalty_count(&self, color: PieceColor) -> usize {
         self.royalty_positions[color.index()].len()
     }
-
     #[inline]
     fn royalty_remove(&mut self, color: PieceColor, pos: Position) {
         self.royalty_positions[color.index()].retain(|p| *p != pos);
     }
-
     #[inline]
     fn royalty_add(&mut self, color: PieceColor, pos: Position) {
         let list = &mut self.royalty_positions[color.index()];
@@ -138,50 +187,15 @@ impl Board {
         }
     }
 
-    #[inline]
-    fn royalty_update(&mut self, color: PieceColor, old: Position, new: Position) {
-        let list = &mut self.royalty_positions[color.index()];
-        if let Some(slot) = list.iter_mut().find(|p| **p == old) {
-            *slot = new;
-        }
-    }
+    // ─── Piece-count tracking ───────────────────────────────────────────
 
-    // ─── Piece-count tracking (for extinction detection) ────────────────
-
-    /// Total number of pieces of the given color. O(1).
     #[inline]
     pub fn piece_count(&self, color: PieceColor) -> u32 {
         self.piece_counts[color.index()]
     }
-
-    /// Does this color have at least one piece on the board? O(1).
-    /// Used to distinguish extinction (loss) from stalemate (draw) in
-    /// variants with no royal pieces.
     #[inline]
     pub fn has_pieces(&self, color: PieceColor) -> bool {
         self.piece_counts[color.index()] > 0
-    }
-
-    // ─── En passant ─────────────────────────────────────────────────────
-
-    pub fn clear_en_passant_targets(&mut self) {
-        self.en_passant_targets.clear();
-    }
-
-    pub fn add_en_passant_target(&mut self, target: EnPassantTarget) {
-        self.en_passant_targets.push(target);
-    }
-
-    pub fn get_en_passant_target(&self, pos: Position) -> Option<&EnPassantTarget> {
-        self.en_passant_targets.iter().find(|t| t.position == pos)
-    }
-
-    pub fn get_en_passant_targets(&self) -> &[EnPassantTarget] {
-        &self.en_passant_targets
-    }
-
-    pub fn set_en_passant_targets(&mut self, targets: Vec<EnPassantTarget>) {
-        self.en_passant_targets = targets;
     }
 
     // ─── Standard position setup ────────────────────────────────────────
@@ -190,29 +204,11 @@ impl Board {
         if self.size != (8, 8) {
             return;
         }
-        if let Some(piece_indices) = Self::get_standard_piece_indices(config_manager) {
-            let (rook, knight, bishop, queen, king, pawn) = piece_indices;
-            self.setup_back_rank(
-                0,
-                PieceColor::Black,
-                rook,
-                knight,
-                bishop,
-                queen,
-                king,
-                config_manager,
-            );
+        if let Some(pi) = Self::get_standard_piece_indices(config_manager) {
+            let (rook, knight, bishop, queen, king, pawn) = pi;
+            self.setup_back_rank(0, PieceColor::Black, rook, knight, bishop, queen, king, config_manager);
             self.setup_pawn_rank(1, PieceColor::Black, pawn, config_manager);
-            self.setup_back_rank(
-                7,
-                PieceColor::White,
-                rook,
-                knight,
-                bishop,
-                queen,
-                king,
-                config_manager,
-            );
+            self.setup_back_rank(7, PieceColor::White, rook, knight, bishop, queen, king, config_manager);
             self.setup_pawn_rank(6, PieceColor::White, pawn, config_manager);
         }
     }
@@ -222,24 +218,23 @@ impl Board {
     ) -> Option<(usize, usize, usize, usize, usize, usize)> {
         Some((
             config_manager.get_piece_index("rook")?,
-            config_manager.get_piece_index("knight")?,
-            config_manager.get_piece_index("bishop")?,
-            config_manager.get_piece_index("queen")?,
-            config_manager.get_piece_index("king")?,
-            config_manager.get_piece_index("pawn")?,
+              config_manager.get_piece_index("knight")?,
+              config_manager.get_piece_index("bishop")?,
+              config_manager.get_piece_index("queen")?,
+              config_manager.get_piece_index("king")?,
+              config_manager.get_piece_index("pawn")?,
         ))
     }
 
-    /// Look up both royal flags for a piece type from the config.
-    /// Returns (is_royal, is_royalty).
     fn piece_flags(piece_type: usize, config_manager: &PieceConfigManager) -> (bool, bool) {
         config_manager
-            .get_piece_by_index(piece_type)
-            .map_or((false, false), |cfg| {
-                (cfg.properties.is_royal, cfg.properties.is_royalty)
-            })
+        .get_piece_by_index(piece_type)
+        .map_or((false, false), |cfg| {
+            (cfg.properties.is_royal, cfg.properties.is_royalty)
+        })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn setup_back_rank(
         &mut self,
         row: usize,
@@ -257,10 +252,7 @@ impl Board {
         let pieces = [rook, knight, bishop, queen, king, bishop, knight, rook];
         for (col, &pt) in pieces.iter().enumerate() {
             let (is_royal, is_royalty) = Self::piece_flags(pt, config_manager);
-            self.set_piece(
-                (row, col),
-                Some(Piece::new_with_flags(color, pt, is_royal, is_royalty)),
-            );
+            self.set_piece((row, col), Some(Piece::new_with_flags(color, pt, is_royal, is_royalty)));
         }
     }
 
@@ -276,10 +268,7 @@ impl Board {
         }
         let (is_royal, is_royalty) = Self::piece_flags(pawn, config_manager);
         for col in 0..self.size.1.min(8) {
-            self.set_piece(
-                (row, col),
-                Some(Piece::new_with_flags(color, pawn, is_royal, is_royalty)),
-            );
+            self.set_piece((row, col), Some(Piece::new_with_flags(color, pawn, is_royal, is_royalty)));
         }
     }
 
@@ -294,7 +283,6 @@ impl Board {
     pub fn cols(&self) -> usize {
         self.size.1
     }
-
     pub fn is_valid_position(&self, pos: Position) -> bool {
         pos.0 < self.size.0 && pos.1 < self.size.1
     }
@@ -308,16 +296,19 @@ impl Board {
         }
     }
 
-    // ─── Mutation — the three methods that maintain all tracking ────────
+    // ─── Mutation — the ONE primitive ───────────────────────────────────
+    //
+    // `BoardEvent::{Lift, Drop}` are the only callers during play. There is
+    // deliberately no `move_piece`: it bundled a `move_count` bump with a
+    // two-square mutation and could not express Chess960's overlapping
+    // king/rook squares.
 
     pub fn set_piece(&mut self, pos: Position, piece: Option<Piece>) {
         if !self.is_valid_position(pos) {
             return;
         }
-
         let index = pos.0 * self.size.1 + pos.1;
 
-        // Remove old occupant from all tracking structures.
         if let Some(old) = self.squares[index] {
             if old.is_royal {
                 self.royal_remove(old.color, pos);
@@ -329,7 +320,6 @@ impl Board {
             self.xor_piece(old, pos);
         }
 
-        // Add new occupant to all tracking structures.
         if let Some(new) = piece {
             if new.is_royal {
                 self.royal_add(new.color, pos);
@@ -344,44 +334,6 @@ impl Board {
         self.squares[index] = piece;
     }
 
-    pub fn move_piece(&mut self, from: Position, to: Position) {
-        if !self.is_valid_position(from) || !self.is_valid_position(to) {
-            return;
-        }
-
-        let from_index = from.0 * self.size.1 + from.1;
-        let to_index = to.0 * self.size.1 + to.1;
-
-        if let Some(mut piece) = self.squares[from_index].take() {
-            self.xor_piece(piece, from);
-            piece.move_count += 1;
-
-            // Captured piece: remove from all tracking.
-            if let Some(victim) = self.squares[to_index] {
-                if victim.is_royal {
-                    self.royal_remove(victim.color, to);
-                }
-                if victim.is_royalty {
-                    self.royalty_remove(victim.color, to);
-                }
-                self.piece_counts[victim.color.index()] -= 1;
-                self.xor_piece(victim, to);
-            }
-
-            // Moving piece: update position in royal/royalty lists.
-            // Piece count is unchanged (same piece, different square).
-            if piece.is_royal {
-                self.royal_update(piece.color, from, to);
-            }
-            if piece.is_royalty {
-                self.royalty_update(piece.color, from, to);
-            }
-
-            self.xor_piece(piece, to);
-            self.squares[to_index] = Some(piece);
-        }
-    }
-
     pub fn clear(&mut self) {
         for square in &mut self.squares {
             *square = None;
@@ -392,6 +344,7 @@ impl Board {
         self.royalty_positions[1].clear();
         self.piece_counts = [0, 0];
         self.piece_hash = 0;
+        self.clear_ghosts();
     }
 
     // ─── Serialization & queries ────────────────────────────────────────
@@ -416,9 +369,7 @@ impl Board {
                     }
                     rank_fen.push(piece.to_char(config_manager));
                 }
-                None => {
-                    empty_count += 1;
-                }
+                None => empty_count += 1,
             }
         }
         if empty_count > 0 {

@@ -1,0 +1,9 @@
+name: Containment-Hunter
+base: Influence
+material_weight: 130.0       # Increase slightly to make it "price" the sacrifices
+territory_weight: 10.0       # Decrease (let them have the space)
+threat_weight: 0.9           # MASSIVE INCREASE (Force it to punish over-extension)
+control_sharpness: 1.1       # Lowered (match their linear pressure)
+base_influence: 0.2          # Lowered
+royal_value_factor: 7.0      # Balanced
+tempo_bonus: 12.0

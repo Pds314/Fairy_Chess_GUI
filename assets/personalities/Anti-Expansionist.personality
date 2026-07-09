@@ -1,0 +1,9 @@
+name: Anti-Expansionist
+base: Influence
+material_weight: 90.0        # Neutral
+territory_weight: 8.0        # Low (ignore the space)
+threat_weight: 1.5           # HIGH (Attack the piece-makers)
+control_sharpness: 2.0       # Higher (Make it punish density)
+base_influence: 0.1          # Very low (Don't care about influence footprint)
+royal_value_factor: 5.0      # Solid protection
+tempo_bonus: 5.0             # Lower

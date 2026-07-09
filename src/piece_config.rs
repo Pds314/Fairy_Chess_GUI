@@ -170,4 +170,14 @@ impl PieceConfigManager {
             .get(index)
             .and_then(|name| self.pieces.get(name))
     }
+    /// Returns `(is_royal, is_royalty)` flags for a piece type.
+    /// Single source of truth — replaces the duplicated free functions
+    /// in game_state.rs and Board::piece_flags.
+    #[inline]
+    pub fn piece_flags(&self, piece_type: usize) -> (bool, bool) {
+        self.get_piece_by_index(piece_type)
+        .map_or((false, false), |c| {
+            (c.properties.is_royal, c.properties.is_royalty)
+        })
+    }
 }

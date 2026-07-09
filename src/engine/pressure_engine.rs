@@ -1,16 +1,27 @@
-// Create new file: src/engine/pressure_engine.rs
+// src/engine/pressure_engine.rs
+//
+// Zone-control engine.
+//
+// Three fixes over the original:
+//   * `evaluate` was returning white-minus-black regardless of side to move.
+//     In a negamax search that is simply wrong; it is now STM-relative.
+//   * Zone attribution was O(pieces · moves · zones) because every generated
+//     move was tested against every zone. A zone index is a division.
+//   * It used `generate_moves_with_details` (the re-tracing path) rather than
+//     `generate_moves_with_database`.
 
-use crate::core::GameState;
-use crate::core::board::Board;
 use crate::core::piece::{Piece, PieceColor};
 use crate::core::position::Position;
-use crate::engine::api::{ChessEngine, Evaluation, SearchParams, SearchResult};
+use crate::core::GameState;
+use crate::engine::api::{ChessEngine, SearchParams, SearchResult};
 use crate::engine::evaluator::EvaluatorTrait;
-use crate::engine::parameters::{EngineParameters, ParameterDef, ParameterizedEngine};
-use crate::engine::search::Search;
+use crate::engine::parameters::{EngineParameters, ParameterDef};
+use crate::engine::search::{combined_params, run_search, TTEntry};
 use crate::move_generator::MoveGenerator;
 use crate::piece_config::PieceConfigManager;
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 pub const PARAM_ZONE_SIZE: &str = "zone_size";
 pub const PARAM_CONTROL_WEIGHT: &str = "control_weight";
@@ -21,231 +32,178 @@ pub static PRESSURE_PARAMETERS: &[ParameterDef] = &[
     ParameterDef::new(
         PARAM_ZONE_SIZE,
         "Zone Size",
-        "Size of pressure zones (2-4). Smaller = more granular analysis.",
-        2.0,
-        4.0,
-        3.0,
-        1.0,
+        "Size of pressure zones (2-4). Smaller = more granular analysis. Read once per search.",
+                      2.0, 4.0, 3.0, 1.0,
     ),
-    ParameterDef::new(
-        PARAM_CONTROL_WEIGHT,
-        "Control Weight",
-        "How much zone control matters. Higher = dominance is more important.",
-        0.5,
-        3.0,
-        1.0,
-        0.1,
-    ),
-    ParameterDef::new(
-        PARAM_CONTESTED_BONUS,
-        "Contested Zone Bonus",
-        "Bonus for zones where both sides have pieces. Rewards fighting for key squares.",
-        0.0,
-        2.0,
-        0.5,
-        0.1,
-    ),
-    ParameterDef::new(
-        PARAM_EDGE_PENALTY,
-        "Edge Zone Penalty",
-        "Penalty for control of edge zones. Higher = prefers central control.",
-        0.0,
-        1.0,
-        0.3,
-        0.1,
-    ),
+ParameterDef::new(
+    PARAM_CONTROL_WEIGHT,
+    "Control Weight",
+    "How much zone control matters. Higher = dominance is more important.",
+    0.5, 3.0, 1.0, 0.1,
+),
+ParameterDef::new(
+    PARAM_CONTESTED_BONUS,
+    "Contested Zone Bonus",
+    "Bonus for zones where both sides have pieces.",
+    0.0, 2.0, 0.5, 0.1,
+),
+ParameterDef::new(
+    PARAM_EDGE_PENALTY,
+    "Edge Zone Penalty",
+    "Penalty factor for control of edge zones. Higher = prefers central control.",
+    0.0, 1.0, 0.3, 0.1,
+),
 ];
 
-/// Engine that evaluates based on board zone control and pressure
+struct ZoneScratch {
+    zs: usize,
+    zrows: usize,
+    zcols: usize,
+    pieces: [Vec<u32>; 2],
+    attacks: [Vec<u32>; 2],
+}
+
+impl ZoneScratch {
+    fn new(rows: usize, cols: usize, zs: usize) -> Self {
+        let zrows = rows.div_ceil(zs);
+        let zcols = cols.div_ceil(zs);
+        let nz = (zrows * zcols).max(1);
+        Self {
+            zs,
+            zrows,
+            zcols,
+            pieces: [vec![0; nz], vec![0; nz]],
+            attacks: [vec![0; nz], vec![0; nz]],
+        }
+    }
+    #[inline(always)]
+    fn idx(&self, r: usize, c: usize) -> usize {
+        (r / self.zs) * self.zcols + c / self.zs
+    }
+    fn clear(&mut self) {
+        for ci in 0..2 {
+            for v in self.pieces[ci].iter_mut() {
+                *v = 0;
+            }
+            for v in self.attacks[ci].iter_mut() {
+                *v = 0;
+            }
+        }
+    }
+    #[inline]
+    fn is_edge_zone(&self, zi: usize) -> bool {
+        let zr = zi / self.zcols;
+        let zc = zi % self.zcols;
+        zr == 0 || zc == 0 || zr + 1 == self.zrows || zc + 1 == self.zcols
+    }
+}
+
 pub struct PressureEngine {
     parameters: EngineParameters,
+    transposition_table: HashMap<u64, TTEntry>,
 }
 
 impl PressureEngine {
     pub fn new() -> Self {
+        static MERGED: OnceLock<Vec<ParameterDef>> = OnceLock::new();
         Self {
-            parameters: EngineParameters::from_defaults(PRESSURE_PARAMETERS),
+            parameters: EngineParameters::from_defaults(combined_params(
+                PRESSURE_PARAMETERS,
+                &MERGED,
+            )),
+            transposition_table: HashMap::new(),
         }
     }
+    #[inline]
+    fn p(&self, id: &str, d: f64) -> f64 {
+        self.parameters.get_or_default(id, d)
+    }
+    fn zone_size(&self) -> usize {
+        (self.p(PARAM_ZONE_SIZE, 3.0) as usize).clamp(2, 4)
+    }
+}
 
-    fn get_param(&self, id: &str, default: f64) -> f64 {
-        self.parameters.get_or_default(id, default)
+impl Default for PressureEngine {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 struct PressureEvaluator<'a> {
     engine: &'a PressureEngine,
+    z: RefCell<ZoneScratch>,
 }
 
-#[derive(Debug, Clone)]
-struct Zone {
-    top_left: Position,
-    size: usize,
-    white_pieces: Vec<Position>,
-    black_pieces: Vec<Position>,
-    white_attacks: usize,
-    black_attacks: usize,
-}
-
-impl<'a> PressureEvaluator<'a> {
-    /// Divide board into zones and calculate control
-    fn calculate_zones(&self, state: &GameState, zone_size: usize) -> Vec<Zone> {
-        let (rows, cols) = state.board.size();
-        let mut zones = Vec::new();
-
-        for zone_row in (0..rows).step_by(zone_size) {
-            for zone_col in (0..cols).step_by(zone_size) {
-                let mut zone = Zone {
-                    top_left: (zone_row, zone_col),
-                    size: zone_size,
-                    white_pieces: Vec::new(),
-                    black_pieces: Vec::new(),
-                    white_attacks: 0,
-                    black_attacks: 0,
-                };
-
-                // Count pieces in zone
-                for r in zone_row..zone_row.saturating_add(zone_size).min(rows) {
-                    for c in zone_col..zone_col.saturating_add(zone_size).min(cols) {
-                        if let Some(piece) = state.board.get_piece((r, c)) {
-                            match piece.color {
-                                PieceColor::White => zone.white_pieces.push((r, c)),
-                                PieceColor::Black => zone.black_pieces.push((r, c)),
-                            }
-                        }
-                    }
-                }
-
-                zones.push(zone);
-            }
-        }
-
-        zones
-    }
-
-    /// Calculate attack/defense pressure on zones
-    fn calculate_zone_pressure(
-        &self,
-        zones: &mut [Zone],
-        state: &GameState,
-        move_generator: &MoveGenerator,
-    ) {
-        // For each piece, count which zones it can attack
-        let white_pieces = state.board.get_pieces_by_color(PieceColor::White);
-        let black_pieces = state.board.get_pieces_by_color(PieceColor::Black);
-
-        for (pos, piece) in white_pieces {
-            let moves =
-                move_generator.generate_moves_with_details(&state.board, pos, piece.piece_type);
-
-            for mv in moves {
-                for zone in zones.iter_mut() {
-                    if self.position_in_zone(mv.destination, zone) {
-                        zone.white_attacks += 1;
-                    }
-                }
-            }
-        }
-
-        for (pos, piece) in black_pieces {
-            let moves =
-                move_generator.generate_moves_with_details(&state.board, pos, piece.piece_type);
-
-            for mv in moves {
-                for zone in zones.iter_mut() {
-                    if self.position_in_zone(mv.destination, zone) {
-                        zone.black_attacks += 1;
-                    }
-                }
-            }
-        }
-    }
-
-    fn position_in_zone(&self, pos: Position, zone: &Zone) -> bool {
-        pos.0 >= zone.top_left.0
-            && pos.0 < zone.top_left.0 + zone.size
-            && pos.1 >= zone.top_left.1
-            && pos.1 < zone.top_left.1 + zone.size
-    }
-
-    fn is_edge_zone(&self, zone: &Zone, board_size: (usize, usize)) -> bool {
-        zone.top_left.0 == 0
-            || zone.top_left.1 == 0
-            || zone.top_left.0 + zone.size >= board_size.0
-            || zone.top_left.1 + zone.size >= board_size.1
-    }
-
-    fn evaluate_zones(&self, zones: &[Zone], board_size: (usize, usize)) -> f64 {
-        let control_weight = self.engine.get_param(PARAM_CONTROL_WEIGHT, 1.0);
-        let contested_bonus = self.engine.get_param(PARAM_CONTESTED_BONUS, 0.5);
-        let edge_penalty = self.engine.get_param(PARAM_EDGE_PENALTY, 0.3);
-
-        let mut total_score = 0.0;
-
-        for zone in zones {
-            let white_control = zone.white_pieces.len() as f64 + zone.white_attacks as f64 * 0.5;
-            let black_control = zone.black_pieces.len() as f64 + zone.black_attacks as f64 * 0.5;
-
-            let zone_score = (white_control - black_control) * control_weight;
-
-            // Bonus for contested zones (both sides present)
-            let contested = if !zone.white_pieces.is_empty() && !zone.black_pieces.is_empty() {
-                contested_bonus
-            } else {
-                0.0
-            };
-
-            // Penalty for edge control
-            let edge_factor = if self.is_edge_zone(zone, board_size) {
-                1.0 - edge_penalty
-            } else {
-                1.0
-            };
-
-            total_score += (zone_score + contested) * edge_factor;
-        }
-
-        total_score
-    }
-}
-
-impl<'a> EvaluatorTrait for PressureEvaluator<'a> {
+impl EvaluatorTrait for PressureEvaluator<'_> {
     fn evaluate(
         &self,
         state: &mut GameState,
-        move_generator: &MoveGenerator,
-        _config_manager: &PieceConfigManager,
+        mg: &MoveGenerator,
+        _cm: &PieceConfigManager,
     ) -> i32 {
-        let zone_size = self.engine.get_param(PARAM_ZONE_SIZE, 3.0) as usize;
-        let zone_size = zone_size.max(2).min(4);
+        let b = &state.board;
+        let (rows, cols) = b.size();
+        let mut z = self.z.borrow_mut();
+        z.clear();
 
-        let mut zones = self.calculate_zones(state, zone_size);
-        self.calculate_zone_pressure(&mut zones, state, move_generator);
-
-        let score = self.evaluate_zones(&zones, state.board.size());
-        (score * 100.0) as i32
-    }
-}
-
-impl ParameterizedEngine for PressureEngine {
-    fn parameter_definitions(&self) -> &'static [ParameterDef] {
-        PRESSURE_PARAMETERS
-    }
-
-    fn get_parameters(&self) -> &EngineParameters {
-        &self.parameters
-    }
-
-    fn set_parameters(&mut self, params: EngineParameters) -> bool {
-        let changed = self.parameters != params;
-        if changed {
-            self.parameters = params;
+        for r in 0..rows {
+            for c in 0..cols {
+                let Some(p) = b.get_piece((r, c)) else { continue };
+                let ci = p.color.index();
+                let zi = z.idx(r, c);
+                z.pieces[ci][zi] += 1;
+                for mv in mg.generate_moves_with_database(b, (r, c), p.piece_type) {
+                    let d = mv.destination;
+                    let di = z.idx(d.0, d.1);
+                    z.attacks[ci][di] += 1;
+                }
+            }
         }
-        changed
+
+        let cw = self.engine.p(PARAM_CONTROL_WEIGHT, 1.0);
+        let cb = self.engine.p(PARAM_CONTESTED_BONUS, 0.5);
+        let ep = self.engine.p(PARAM_EDGE_PENALTY, 0.3);
+
+        let nz = z.pieces[0].len();
+        let mut white_total = 0.0f64;
+        for zi in 0..nz {
+            let wc = z.pieces[0][zi] as f64 + z.attacks[0][zi] as f64 * 0.5;
+            let bc = z.pieces[1][zi] as f64 + z.attacks[1][zi] as f64 * 0.5;
+            let zone_score = (wc - bc) * cw;
+            let contested = if z.pieces[0][zi] > 0 && z.pieces[1][zi] > 0 {
+                cb
+            } else {
+                0.0
+            };
+            let edge_factor = if z.is_edge_zone(zi) { 1.0 - ep } else { 1.0 };
+            white_total += (zone_score + contested) * edge_factor;
+        }
+
+        // Negamax demands a side-to-move perspective. The original returned
+        // white-minus-black unconditionally.
+        let stm = match state.current_turn {
+            PieceColor::White => white_total,
+            PieceColor::Black => -white_total,
+        };
+        (stm * 100.0) as i32
     }
 
-    fn on_parameters_changed(&mut self) {
-        // Pressure engine doesn't need reinitialization
+    fn get_piece_value_on_square(
+        &self,
+        _p: &Piece,
+        _s: Position,
+        _cm: &PieceConfigManager,
+    ) -> i32 {
+        100
+    }
+    fn delta_pruning_margin(&self) -> i32 {
+        1500
+    }
+    fn aspiration_window(&self) -> i32 {
+        300
+    }
+    fn contempt(&self) -> i32 {
+        40
     }
 }
 
@@ -254,57 +212,40 @@ impl ChessEngine for PressureEngine {
         "Pressure Engine (Zone Control)"
     }
 
+    fn reset_cache(&mut self) {
+        self.transposition_table.clear();
+    }
+
     fn best_move(&mut self, params: SearchParams) -> Option<SearchResult> {
-        let evaluator = PressureEvaluator { engine: self };
-        let mut search = Search::new(&evaluator);
-        let depth = if params.depth > 0 { params.depth } else { 3 };
-
-        let (best_move, evaluation, depth_reached) = if let Some(time_limit) = params.time_limit {
-            search.find_best_move_iterative(
-                params.state,
-                params.move_generator,
-                params.config_manager,
-                depth,
-                time_limit,
-            )?
-        } else {
-            search.find_best_move_with_depth(
-                params.state,
-                params.move_generator,
-                params.config_manager,
-                depth,
-            )?
+        let (rows, cols) = params.state.board.size();
+        let zs = self.zone_size();
+        let mut tt = std::mem::take(&mut self.transposition_table);
+        let result = {
+            let ev = PressureEvaluator {
+                engine: &*self,
+                z: RefCell::new(ZoneScratch::new(rows, cols, zs)),
+            };
+            run_search(&ev, params, &self.parameters, &mut tt, 3)
         };
-
-        let mate_in = if evaluation >= 999000 {
-            Some(((999999 - evaluation) / 2) as i32)
-        } else if evaluation <= -999000 {
-            Some(-((-999999 - evaluation) / 2) as i32)
-        } else {
-            None
-        };
-
-        Some(SearchResult {
-            best_move,
-            evaluation: Evaluation {
-                score: evaluation,
-                mate_in,
-            },
-            depth_reached,
-        })
+        self.transposition_table = tt;
+        result
     }
 
     fn stop(&mut self) {}
 
     fn parameter_definitions(&self) -> Option<&'static [ParameterDef]> {
-        Some(ParameterizedEngine::parameter_definitions(self))
+        static MERGED: OnceLock<Vec<ParameterDef>> = OnceLock::new();
+        Some(combined_params(PRESSURE_PARAMETERS, &MERGED))
     }
-
     fn get_parameters(&self) -> Option<EngineParameters> {
-        Some(ParameterizedEngine::get_parameters(self).clone())
+        Some(self.parameters.clone())
     }
-
-    fn set_parameters(&mut self, params: EngineParameters) -> bool {
-        ParameterizedEngine::set_parameters(self, params)
+    fn set_parameters(&mut self, p: EngineParameters) -> bool {
+        let changed = self.parameters != p;
+        if changed {
+            self.parameters = p;
+            self.transposition_table.clear();
+        }
+        changed
     }
 }

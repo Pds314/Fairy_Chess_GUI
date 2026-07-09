@@ -1,6 +1,6 @@
 # FIDE Standard Chess Game Configuration
 # Standard chess configuration
-position: rnbqkbnr/pppppppp/8/8/8/8/MMMMMMMM/MMMMKMMM
+position: rnbqkbnr/pppppppp/8/8/8/8/MMMMMMMM/MMMMMMMM
 turn: white
 fifty_move: 0
 

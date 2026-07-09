@@ -1,0 +1,9 @@
+name: Principled-Aggro
+base: Influence
+material_weight: 110.0      # Slightly higher to punish over-trading
+territory_weight: 20.0      # Increased slightly to compete for space
+threat_weight: 0.50         # Upped from 0.35 to "snipe" Expansionist pieces
+control_sharpness: 1.45     # Slightly sharper to increase the penalty for clustering
+base_influence: 0.25        # Minor reduction
+royal_value_factor: 8.0     # Lowered from 10.0 to be less passive
+tempo_bonus: 15.0           # Increased to match Expansionist's initiative

@@ -1,5 +1,3 @@
-// src/engine/influence_engine.rs
-
 use crate::core::GameState;
 use crate::core::board::Board;
 use crate::core::piece::{Piece, PieceColor};
@@ -7,13 +5,15 @@ use crate::core::position::Position;
 use crate::engine::analysis;
 use crate::engine::api::{ChessEngine, Evaluation, SearchParams, SearchResult};
 use crate::engine::evaluator::EvaluatorTrait;
-use crate::engine::parameters::{EngineParameters, ParameterDef, ParameterizedEngine};
-use crate::engine::search::{Search, TTEntry};
+use crate::engine::parameters::{EngineParameters, ParameterDef};
+use crate::engine::search::{Search, TTEntry, combined_params, SearchConfig};
 use crate::move_generator::{MoveGenerator, MoveWithPath};
 use crate::piece_config::PieceConfigManager;
+use crate::promotion::PromotionManager;
 use smallvec::SmallVec;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 // ─────────────────────────────────────────────────────────────────────────
 // Tunable parameters
@@ -25,6 +25,8 @@ pub const PARAM_CONTROL_SHARPNESS: &str = "control_sharpness";
 pub const PARAM_BASE_INFLUENCE: &str = "base_influence";
 pub const PARAM_ROYAL_FACTOR: &str = "royal_value_factor";
 pub const PARAM_TEMPO_BONUS: &str = "tempo_bonus";
+pub const PARAM_PROMOTION_INFLUENCE: &str = "promotion_influence";
+pub const PARAM_KING_ATTACK_WEIGHT: &str = "king_attack_weight";
 
 pub static INFLUENCE_PARAMETERS: &[ParameterDef] = &[
     ParameterDef::new(
@@ -36,64 +38,84 @@ pub static INFLUENCE_PARAMETERS: &[ParameterDef] = &[
         100.0,
         1.0,
     ),
-    ParameterDef::new(
-        PARAM_TERRITORY_WEIGHT,
-        "Territory Weight",
-        "Centipawns per unit of net square control.",
-        0.0,
-        50.0,
-        12.0,
-        0.5,
-    ),
-    ParameterDef::new(
-        PARAM_THREAT_WEIGHT,
-        "Threat Weight",
-        "How much extra a controlled square is worth when an enemy piece stands on it \
-         (as a fraction of that piece's value).",
-        0.0,
-        2.0,
-        0.4,
-        0.05,
-    ),
-    ParameterDef::new(
-        PARAM_CONTROL_SHARPNESS,
-        "Control Sharpness",
-        "Steepness of the pressure→control squash. Higher = faster saturation \
-         (stronger diminishing returns on over‑defence).",
-        0.1,
-        5.0,
-        1.5,
-        0.05,
-    ),
-    ParameterDef::new(
-        PARAM_BASE_INFLUENCE,
-        "Base Influence",
-        "Per‑attacker influence floor, independent of the attacker's value. \
-         Raising this makes attacker *count* matter more relative to attacker *cheapness*.",
-        0.0,
-        1.0,
-        0.3,
-        0.02,
-    ),
-    ParameterDef::new(
-        PARAM_ROYAL_FACTOR,
-        "Royal Trade‑Value Factor",
-        "A royal piece's effective trade‑value (for influence purposes only) is the \
-         strongest ordinary piece × this. Higher = royals exert less square control.",
-        1.0,
-        10.0,
-        3.0,
-        0.1,
-    ),
-    ParameterDef::new(
-        PARAM_TEMPO_BONUS,
-        "Tempo Bonus",
-        "Flat centipawn bonus for the side to move.",
-        0.0,
-        50.0,
-        8.0,
-        1.0,
-    ),
+ParameterDef::new(
+    PARAM_TERRITORY_WEIGHT,
+    "Territory Weight",
+    "Centipawns per unit of net square control.",
+    0.0,
+    50.0,
+    12.0,
+    0.5,
+),
+ParameterDef::new(
+    PARAM_THREAT_WEIGHT,
+    "Threat Weight",
+    "How much extra a controlled square is worth when an enemy piece stands on it \
+(as a fraction of that piece's value).",
+                  0.0,
+                  2.0,
+                  0.4,
+                  0.05,
+),
+ParameterDef::new(
+    PARAM_CONTROL_SHARPNESS,
+    "Control Sharpness",
+    "Steepness of the pressure→control squash. Higher = faster saturation \
+(stronger diminishing returns on over‑defence).",
+                  0.1,
+                  5.0,
+                  1.5,
+                  0.05,
+),
+ParameterDef::new(
+    PARAM_BASE_INFLUENCE,
+    "Base Influence",
+    "Per‑attacker influence floor, independent of the attacker's value. \
+Raising this makes attacker *count* matter more relative to attacker *cheapness*.",
+0.0,
+1.0,
+0.3,
+0.02,
+),
+ParameterDef::new(
+    PARAM_ROYAL_FACTOR,
+    "Royal Trade‑Value Factor",
+    "A royal piece's effective trade‑value (for influence purposes only) is the \
+strongest ordinary piece × this. Higher = royals exert less square control.",
+1.0,
+10.0,
+3.0,
+0.1,
+),
+ParameterDef::new(
+    PARAM_TEMPO_BONUS,
+    "Tempo Bonus",
+    "Flat centipawn bonus for the side to move.",
+    0.0,
+    50.0,
+    8.0,
+    1.0,
+),
+ParameterDef::new(
+    PARAM_PROMOTION_INFLUENCE,
+    "Promotion Influence",
+    "Latent promotion value: a promotable piece is credited a fraction of the board-COVERAGE \
+(material) it will gain on promotion, discounted by distance to the promotion rank. This \
+feeds the material & threat economy (the influence model's notion of value), NOT a \
+positional square map. 0 = disabled.",
+0.0, 2.0, 0.0, 0.01,
+),
+ParameterDef::new(
+    PARAM_KING_ATTACK_WEIGHT,
+    "King Attack Weight",
+    "Centipawns per unit of net enemy pressure on a royal piece's zone (its own square plus the \
+squares it can actually reach). Drives both king attack and king safety, and is amplified when \
+the king is under fire and has few safe flight squares (confinement → mating gradient). Uses the \
+live pressure maps and the king's real move pattern, so it works for any king geometry, any \
+number of royal/royalty pieces, and vanishes automatically in king-less / extinction variants. \
+0 = disabled (legacy behaviour).",
+                  0.0, 60.0, 8.0, 1.0,
+),
 ];
 
 #[derive(Clone, Copy)]
@@ -105,6 +127,8 @@ struct CachedParams {
     base_influence: f32,
     royal_factor: f32,
     tempo: f32,
+    promotion_weight: f32,
+    king_attack_weight: f32,
 }
 
 impl CachedParams {
@@ -117,6 +141,8 @@ impl CachedParams {
             base_influence: p.get_or_default(PARAM_BASE_INFLUENCE, 0.3) as f32,
             royal_factor: p.get_or_default(PARAM_ROYAL_FACTOR, 3.0) as f32,
             tempo: p.get_or_default(PARAM_TEMPO_BONUS, 8.0) as f32,
+            promotion_weight: p.get_or_default(PARAM_PROMOTION_INFLUENCE, 0.0) as f32,
+            king_attack_weight: p.get_or_default(PARAM_KING_ATTACK_WEIGHT, 8.0) as f32,
         }
     }
 }
@@ -159,18 +185,18 @@ fn extract_blockers(mwp: &MoveWithPath) -> SmallVec<[BlockCheck; 6]> {
         let next_idx = idxs[i + 1] as usize;
         let continuing = next_idx == step_idx;
         let at_rep_boundary =
-            continuing && step.length > 0 && (rep_count[step_idx] as usize) % step.length == 0;
+        continuing && step.length > 0 && (rep_count[step_idx] as usize) % step.length == 0;
         let (pe, px, pf) = if at_rep_boundary {
             (
                 step.repetition_permissions.can_pass_empty,
-                step.repetition_permissions.can_pass_enemy,
-                step.repetition_permissions.can_pass_friendly,
+             step.repetition_permissions.can_pass_enemy,
+             step.repetition_permissions.can_pass_friendly,
             )
         } else {
             (
                 step.permissions.can_pass_empty,
-                step.permissions.can_pass_enemy,
-                step.permissions.can_pass_friendly,
+             step.permissions.can_pass_enemy,
+             step.permissions.can_pass_friendly,
             )
         };
         if !(pe && px && pf) {
@@ -243,6 +269,8 @@ struct EvalBreakdown {
     score_white_pov: f32,
     score_stm: i32,
     params: CachedParams,
+    white_king_danger: f32,   // ← add
+    black_king_danger: f32,   // ← add
 }
 
 // ── tiny rendering helpers ───────────────────────────────────────────────
@@ -306,12 +334,12 @@ fn print_board_grid(
     }
     println!();
     // top border
-    print!("    ┌");
+    print!("   ┌");
     for c in 0..cols {
         print!(
             "{}{}",
             "─".repeat(cell_w),
-            if c + 1 < cols { "┬" } else { "┐" }
+               if c + 1 < cols { "┬" } else { "┐" }
         );
     }
     println!();
@@ -324,24 +352,24 @@ fn print_board_grid(
         }
         println!(" {}", rows - r);
         if r + 1 < rows {
-            print!("    ├");
+            print!("   ├");
             for c in 0..cols {
                 print!(
                     "{}{}",
                     "─".repeat(cell_w),
-                    if c + 1 < cols { "┼" } else { "┤" }
+                       if c + 1 < cols { "┼" } else { "┤" }
                 );
             }
             println!();
         }
     }
     // bottom border
-    print!("    └");
+    print!("   └");
     for c in 0..cols {
         print!(
             "{}{}",
             "─".repeat(cell_w),
-            if c + 1 < cols { "┴" } else { "┘" }
+               if c + 1 < cols { "┴" } else { "┘" }
         );
     }
     println!();
@@ -365,6 +393,9 @@ struct EvalData {
     attack_rays: Vec<Vec<AttackRay>>,
     pressure: [Vec<f32>; 2],
     influence: Vec<f32>,
+    promo_gain: Vec<f32>,        // per pt: coverage(material) gained on promotion (>=0)
+    promo_proximity: Vec<f32>,   // (pt*2+ci)*flat_size + flat : discount^dist in [0,1]
+    promo_any: bool,
 }
 
 impl EvalData {
@@ -389,13 +420,13 @@ impl EvalData {
         let mut attack_mobility = vec![0.0_f32; num_pieces];
         let mut is_royal = vec![false; num_pieces];
         let mut attack_rays: Vec<Vec<AttackRay>> = (0..num_pieces * 2 * flat_size)
-            .map(|_| Vec::new())
-            .collect();
+        .map(|_| Vec::new())
+        .collect();
 
         for pt in 0..num_pieces {
             is_royal[pt] = config_manager
-                .get_piece_by_index(pt)
-                .map_or(false, |c| c.properties.is_royal);
+            .get_piece_by_index(pt)
+            .map_or(false, |c| c.properties.is_royal);
             let mut mobility_sum = 0.0_f64;
             let mut mobility_cnt = 0u32;
 
@@ -411,7 +442,7 @@ impl EvalData {
                         let from_flat = r * cols + c;
 
                         let theoretical = move_generator
-                            .generate_theoretical_moves_for_pst(from, pt, color, board_size, 0);
+                        .generate_theoretical_moves_for_pst(from, pt, color, board_size, 0);
                         let mut rays: Vec<AttackRay> = Vec::new();
 
                         for mwp in &theoretical {
@@ -425,8 +456,8 @@ impl EvalData {
                             let blockers = extract_blockers(mwp);
                             rays.push(AttackRay {
                                 dest_flat: (dest.0 * cols + dest.1) as u16,
-                                requires_unmoved: mwp.rule.requires_unmoved,
-                                blockers,
+                                      requires_unmoved: mwp.rule.requires_unmoved,
+                                      blockers,
                             });
                         }
 
@@ -439,7 +470,7 @@ impl EvalData {
                         });
                         rays.dedup_by(|later, earlier| {
                             later.dest_flat == earlier.dest_flat
-                                && later.requires_unmoved == earlier.requires_unmoved
+                            && later.requires_unmoved == earlier.requires_unmoved
                         });
 
                         let mut mob_here = 0.0_f64;
@@ -465,10 +496,10 @@ impl EvalData {
         }
 
         let min_mob = attack_mobility
-            .iter()
-            .copied()
-            .filter(|&v| v > 0.0)
-            .fold(f32::INFINITY, f32::min);
+        .iter()
+        .copied()
+        .filter(|&v| v > 0.0)
+        .fold(f32::INFINITY, f32::min);
         let min_mob = if min_mob.is_finite() {
             min_mob.max(0.001)
         } else {
@@ -478,13 +509,51 @@ impl EvalData {
         let material_value: Vec<f32> = attack_mobility.iter().map(|&m| m / min_mob).collect();
 
         let max_material_value = material_value
-            .iter()
-            .zip(is_royal.iter())
-            .filter(|t| !*t.1)
-            .map(|t| *t.0)
-            .fold(0.0_f32, f32::max)
-            .max(1.0);
+        .iter()
+        .zip(is_royal.iter())
+        .filter(|t| !*t.1)
+        .map(|t| *t.0)
+        .fold(0.0_f32, f32::max)
+        .max(1.0);
 
+        // --- Promotion Logic Added Here ---
+        const PROMO_DISCOUNT: f32 = 0.6; // per-step coverage discount toward promotion rank
+        let mut promo_gain = vec![0.0_f32; num_pieces];
+        let mut promo_proximity = vec![0.0_f32; num_pieces * 2 * flat_size];
+        let mut promo_any = false;
+
+        for pt in 0..num_pieces {
+            let can_promote = config_manager
+            .get_piece_by_index(pt)
+            .map_or(false, |c| c.properties.can_promote);
+
+            if !can_promote { continue; }
+
+            let targets = PromotionManager::get_promotion_targets(pt, config_manager);
+            let mut best = 0.0_f32;
+            for &t in &targets {
+                if t < num_pieces { best = best.max(material_value[t]); }
+            }
+
+            let gain = (best - material_value[pt]).max(0.0);
+            if gain <= 0.0 { continue; }
+
+            promo_gain[pt] = gain;
+            promo_any = true;
+
+            // color 0 (White) promotes toward row 0; color 1 toward the last row.
+            for ci in 0..2usize {
+                for r in 0..rows {
+                    let dist = if ci == 0 { r } else { rows - 1 - r };
+                    let prox = PROMO_DISCOUNT.powi(dist as i32);
+                    for c in 0..cols {
+                        promo_proximity[(pt * 2 + ci) * flat_size + r * cols + c] = prox;
+                    }
+                }
+            }
+        }
+
+        // Return Struct
         EvalData {
             board_size,
             cols,
@@ -497,6 +566,9 @@ impl EvalData {
             attack_rays,
             pressure: [vec![0.0; flat_size], vec![0.0; flat_size]],
             influence: vec![0.0; num_pieces],
+            promo_gain,
+            promo_proximity,
+            promo_any,
         }
     }
 
@@ -504,6 +576,81 @@ impl EvalData {
     fn rays_for(&self, pt: usize, color_idx: usize, from_flat: usize) -> &[AttackRay] {
         let slot = (pt * 2 + color_idx) * self.flat_size + from_flat;
         &self.attack_rays[slot]
+    }
+
+    /// Net enemy pressure on one royal piece's zone.
+    ///
+    /// Zone = the king's own square (check pressure) plus every square it
+    /// can currently reach (its cleared attack rays). For each zone square
+    /// we take `attacker_pressure - defender_pressure`, accumulating only
+    /// the squares the attacker is winning. Squares the defender holds are
+    /// counted as "safe flight squares".
+    ///
+    /// Confinement amplifier (Change B): when the king square itself is
+    /// under fire and few flight squares remain, the danger is scaled up to
+    /// 2× — this is the gradient that turns pressure into a mating attack.
+    ///
+    /// Generic over king geometry (rays encode the real move pattern) and
+    /// board size (zone is the king's actual reach, not a fixed radius).
+    fn royal_zone_danger(&self, board: &Board, pos: Position, color: PieceColor) -> f32 {
+        let Some(piece) = board.get_piece(pos) else { return 0.0 };
+        let pt = piece.piece_type;
+        if pt >= self.num_pieces {
+            return 0.0;
+        }
+        let ai = color.opposite().index(); // attacker pressure index
+        let di = color.index(); // defender pressure index
+        let from_flat = pos.0 * self.cols + pos.1;
+
+        // Pressure landing on the king's own square ≈ "is in check / attacked".
+        let check_pressure = unsafe { *self.pressure[ai].get_unchecked(from_flat) };
+        let mut danger = check_pressure;
+
+        let slot = (pt * 2 + di) * self.flat_size + from_flat;
+        let mut ring = 0u32;
+        let mut safe = 0u32;
+        for ray in &self.attack_rays[slot] {
+            if ray.requires_unmoved && piece.move_count > 0 {
+                continue;
+            }
+            if !ray_is_clear(ray, board, color) {
+                continue;
+            }
+            let z = ray.dest_flat as usize;
+            ring += 1;
+            let net = unsafe {
+                *self.pressure[ai].get_unchecked(z) - *self.pressure[di].get_unchecked(z)
+            };
+            if net > 0.0 {
+                danger += net;
+            } else {
+                safe += 1;
+            }
+        }
+
+        if check_pressure > 0.0 && ring > 0 {
+            // confine ∈ [0,1]: fraction of flight squares the attacker controls.
+            let confine = (ring - safe) as f32 / ring as f32;
+            danger *= 1.0 + confine;
+        }
+        danger
+    }
+
+    /// Total danger to `color`'s royalty. Pulls the protected-piece set from
+    /// the board's live tracking (Change C): all 'R' royal pieces always, plus
+    /// the single remaining 'r' royalty piece when exactly one is left —
+    /// mirroring GameState::is_in_check_fast. Returns 0 when `color` has no
+    /// protected pieces (king-less / extinction variants).
+    fn royal_danger(&self, board: &Board, color: PieceColor) -> f32 {
+        let mut total = 0.0_f32;
+        for &p in board.get_royal_positions(color) {
+            total += self.royal_zone_danger(board, p, color);
+        }
+        let royalty = board.get_royalty_positions(color);
+        if royalty.len() == 1 {
+            total += self.royal_zone_danger(board, royalty[0], color);
+        }
+        total
     }
 }
 
@@ -517,7 +664,9 @@ pub struct InfluenceEngine {
 
 impl InfluenceEngine {
     pub fn new() -> Self {
-        let parameters = EngineParameters::from_defaults(INFLUENCE_PARAMETERS);
+        static MERGED: OnceLock<Vec<ParameterDef>> = OnceLock::new();
+        let defs = combined_params(INFLUENCE_PARAMETERS, &MERGED);
+        let parameters = EngineParameters::from_defaults(defs);
         let cached_params = CachedParams::from(&parameters);
         Self {
             eval_data: RefCell::new(None),
@@ -537,10 +686,10 @@ impl InfluenceEngine {
         let needs_rebuild = {
             let d = self.eval_data.borrow();
             self.needs_reinit
-                || d.is_none()
-                || d.as_ref().map_or(true, |d| {
-                    d.board_size != board.size() || d.num_pieces != config_manager.piece_order.len()
-                })
+            || d.is_none()
+            || d.as_ref().map_or(true, |d| {
+                d.board_size != board.size() || d.num_pieces != config_manager.piece_order.len()
+            })
         };
         if !needs_rebuild {
             return;
@@ -548,8 +697,8 @@ impl InfluenceEngine {
         println!(
             "🔄 InfluenceEngine: building attack‑ray table for {}×{} board, {} piece types…",
             board.size().0,
-            board.size().1,
-            config_manager.piece_order.len()
+                 board.size().1,
+                 config_manager.piece_order.len()
         );
         let data = EvalData::build(board, move_generator, config_manager);
         for pt in 0..data.num_pieces {
@@ -581,6 +730,8 @@ impl InfluenceEngine {
         let rows = data.board_size.0;
         let cols = data.cols;
 
+        let promo_on = cp.promotion_weight > 0.0 && data.promo_any;
+
         for pt in 0..data.num_pieces {
             let trade_value = if data.is_royal[pt] {
                 data.max_material_value * cp.royal_factor
@@ -608,7 +759,17 @@ impl InfluenceEngine {
                 let ci = piece.color.index();
                 let from_flat = r * cols + c;
 
-                let mv = data.material_value[pt];
+                let mut mv = data.material_value[pt];
+                if promo_on {
+                    let g = data.promo_gain[pt];
+                    if g > 0.0 {
+                        let prox = unsafe {
+                            *data.promo_proximity
+                            .get_unchecked((pt * 2 + ci) * data.flat_size + from_flat)
+                        };
+                        mv += cp.promotion_weight * prox * g;
+                    }
+                }
                 if ci == 0 {
                     material_w += mv;
                 } else {
@@ -662,14 +823,118 @@ impl InfluenceEngine {
             }
         }
 
-        let score_w =
-            cp.material_weight * (material_w - material_b) + cp.territory_weight * territory;
+        let mut score_w =
+        cp.material_weight * (material_w - material_b) + cp.territory_weight * territory;
+
+        // King safety / aggression (net enemy pressure on royal zones).
+        // White is rewarded for Black-king danger and penalised for its own.
+        if cp.king_attack_weight != 0.0 {
+            let white_danger = data.royal_danger(&state.board, PieceColor::White);
+            let black_danger = data.royal_danger(&state.board, PieceColor::Black);
+            score_w += cp.king_attack_weight * (black_danger - white_danger);
+        }
+
         let stm_sign = match state.current_turn {
             PieceColor::White => 1.0_f32,
             PieceColor::Black => -1.0_f32,
         };
 
         (stm_sign * score_w + cp.tempo).round() as i32
+    }
+
+    fn evaluate_split_position(&self, state: &GameState) -> Option<(f32, f32)> {
+        let cp = self.cached_params;
+        let mut guard = self.eval_data.borrow_mut();
+        let data = guard.as_mut()?;
+        if data.board_size != state.board.size() { return None; }
+        let rows = data.board_size.0;
+        let cols = data.cols;
+        let promo_on = cp.promotion_weight > 0.0 && data.promo_any;
+
+        for pt in 0..data.num_pieces {
+            let trade = if data.is_royal[pt] {
+                data.max_material_value * cp.royal_factor
+            } else { data.material_value[pt] }.max(0.001);
+            data.influence[pt] = cp.base_influence + 1.0 / trade;
+        }
+        data.pressure[0].fill(0.0);
+        data.pressure[1].fill(0.0);
+
+        let mut material_w = 0.0_f32;
+        let mut material_b = 0.0_f32;
+        for r in 0..rows {
+            for c in 0..cols {
+                let Some(piece) = state.board.get_piece((r, c)) else { continue };
+                let pt = piece.piece_type;
+                if pt >= data.num_pieces { continue; }
+                let ci = piece.color.index();
+                let from_flat = r * cols + c;
+
+                let mut mv = data.material_value[pt];
+                if promo_on {
+                    let g = data.promo_gain[pt];
+                    if g > 0.0 {
+                        let prox = unsafe {
+                            *data.promo_proximity
+                            .get_unchecked((pt * 2 + ci) * data.flat_size + from_flat)
+                        };
+                        mv += cp.promotion_weight * prox * g;
+                    }
+                }
+                if ci == 0 { material_w += mv; } else { material_b += mv; }
+
+                let infl = data.influence[pt];
+                let slot = (pt * 2 + ci) * data.flat_size + from_flat;
+                for ray in &data.attack_rays[slot] {
+                    if ray.requires_unmoved && piece.move_count > 0 { continue; }
+                    if ray_is_clear(ray, &state.board, piece.color) {
+                        unsafe { *data.pressure[ci].get_unchecked_mut(ray.dest_flat as usize) += infl; }
+                    }
+                }
+            }
+        }
+
+        let mut white_mass = 0.0_f32;
+        let mut black_mass = 0.0_f32;
+        let (sharpness, tw) = (cp.sharpness, cp.threat_weight);
+        for r in 0..rows {
+            let rb = r * cols;
+            for c in 0..cols {
+                let flat = rb + c;
+                let wp = unsafe { *data.pressure[0].get_unchecked(flat) };
+                let bp = unsafe { *data.pressure[1].get_unchecked(flat) };
+                let raw = sharpness * (wp - bp);
+                let control = raw / (1.0 + raw.abs());
+                if control > 0.0 { white_mass += control; } else { black_mass += -control; }
+
+                if let Some(occ) = state.board.get_piece((r, c)) {
+                    if occ.piece_type < data.num_pieces {
+                        let v = data.material_value[occ.piece_type];
+                        match occ.color {
+                            PieceColor::Black => white_mass += control.max(0.0) * tw * v,
+                            PieceColor::White => black_mass += -(control.min(0.0) * tw * v),
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut white_abs = cp.material_weight * material_w + cp.territory_weight * white_mass;
+        let mut black_abs = cp.material_weight * material_b + cp.territory_weight * black_mass;
+
+        if cp.king_attack_weight != 0.0 {
+            // Each side's "goodness" gains from the danger it inflicts on the
+            // enemy king — keeps the split consistent with evaluate_position.
+            let white_danger = data.royal_danger(&state.board, PieceColor::White);
+            let black_danger = data.royal_danger(&state.board, PieceColor::Black);
+            white_abs += cp.king_attack_weight * black_danger;
+            black_abs += cp.king_attack_weight * white_danger;
+        }
+
+        Some(match state.current_turn {
+            PieceColor::White => (white_abs, black_abs),
+             PieceColor::Black => (black_abs, white_abs),
+        })
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -741,10 +1006,10 @@ impl InfluenceEngine {
                 }
                 footprints.push(PieceFootprint {
                     pos: (r, c),
-                    color: piece.color,
-                    piece_type: pt,
-                    squares_attacked: attacked,
-                    influence_projected: attacked as f32 * infl,
+                                color: piece.color,
+                                piece_type: pt,
+                                squares_attacked: attacked,
+                                influence_projected: attacked as f32 * infl,
                 });
             }
         }
@@ -778,8 +1043,20 @@ impl InfluenceEngine {
             }
         }
 
-        let score_white_pov =
-            cp.material_weight * (material_w - material_b) + cp.territory_weight * territory_sum;
+        let (white_king_danger, black_king_danger) = if cp.king_attack_weight != 0.0 {
+            (
+                data.royal_danger(&state.board, PieceColor::White),
+             data.royal_danger(&state.board, PieceColor::Black),
+            )
+        } else {
+            (0.0, 0.0)
+        };
+        let king_cp = cp.king_attack_weight * (black_king_danger - white_king_danger);
+
+        let score_white_pov = cp.material_weight * (material_w - material_b)
+        + cp.territory_weight * territory_sum
+        + king_cp;
+
         let stm_sign = if state.current_turn == PieceColor::White {
             1.0
         } else {
@@ -791,21 +1068,23 @@ impl InfluenceEngine {
             rows,
             cols,
             pressure_w: data.pressure[0].clone(),
-            pressure_b: data.pressure[1].clone(),
-            control,
-            threat,
-            material_value: data.material_value.clone(),
-            attack_mobility: data.attack_mobility.clone(),
-            influence: data.influence.clone(),
-            is_royal: data.is_royal.clone(),
-            max_material_value: data.max_material_value,
-            footprints,
-            material_w,
-            material_b,
-            territory_sum,
-            score_white_pov,
-            score_stm,
-            params: cp,
+             pressure_b: data.pressure[1].clone(),
+             control,
+             threat,
+             material_value: data.material_value.clone(),
+             attack_mobility: data.attack_mobility.clone(),
+             influence: data.influence.clone(),
+             is_royal: data.is_royal.clone(),
+             max_material_value: data.max_material_value,
+             footprints,
+             material_w,
+             material_b,
+             territory_sum,
+             score_white_pov,
+             score_stm,
+             params: cp,
+             white_king_danger,   // ← add
+             black_king_danger,   // ← add
         })
     }
 
@@ -843,7 +1122,7 @@ impl InfluenceEngine {
         println!("{hr}");
         println!(
             " Side to move: {stm:<6}   Static eval (STM POV): {:+} cp   ({verdict})",
-            bd.score_stm
+                 bd.score_stm
         );
 
         // ── score breakdown ─────────────────────────────────────────────
@@ -864,6 +1143,18 @@ impl InfluenceEngine {
             "  {:<14}{:>9}{:>9}{:>+10.2}{:>11.1}{:>+11.0}",
             "Territory", "", "", bd.territory_sum, cp.territory_weight, terr_cp
         );
+        if cp.king_attack_weight != 0.0 {
+            let king_net = bd.black_king_danger - bd.white_king_danger;
+            println!(
+                "  {:<14}{:>9.2}{:>9.2}{:>+10.2}{:>11.1}{:>+11.0}",
+                "King safety",
+                bd.black_king_danger, // White's credit = danger to Black king
+                bd.white_king_danger, // Black's credit = danger to White king
+                king_net,
+                cp.king_attack_weight,
+                cp.king_attack_weight * king_net
+            );
+        }
         println!("  {:>64}", "──────────");
         println!(
             "  {:<53}{:>+11.0}",
@@ -872,7 +1163,7 @@ impl InfluenceEngine {
         println!(
             "  {:<53}{:>+11.0}",
             format!("Tempo (to move: {stm})"),
-            cp.tempo
+                cp.tempo
         );
         println!("  {:>64}", "══════════");
         println!("  {:<53}{:>+11}", "TOTAL (STM POV)", bd.score_stm);
@@ -885,9 +1176,9 @@ impl InfluenceEngine {
         );
         for pt in 0..bd.material_value.len() {
             let name = cm
-                .get_piece_by_index(pt)
-                .map(|c| c.display_name.clone())
-                .unwrap_or_else(|| format!("#{pt}"));
+            .get_piece_by_index(pt)
+            .map(|c| c.display_name.clone())
+            .unwrap_or_else(|| format!("#{pt}"));
             let royal = bd.is_royal[pt];
             let extra = if royal {
                 format!(
@@ -925,10 +1216,10 @@ impl InfluenceEngine {
             let flat = r * cols + c;
             let ctl = bd.control[flat];
             let ch = state
-                .board
-                .get_piece((r, c))
-                .map(|p| p.to_char(cm))
-                .unwrap_or('·');
+            .board
+            .get_piece((r, c))
+            .map(|p| p.to_char(cm))
+            .unwrap_or('·');
             (format!("{} {:+.2}", ch, ctl), control_bg_256(ctl))
         });
 
@@ -939,7 +1230,7 @@ impl InfluenceEngine {
                 let flat = r * cols + c;
                 (
                     format!("{:>4.1}/{:<4.1}", bd.pressure_w[flat], bd.pressure_b[flat]),
-                    0,
+                        0,
                 )
             });
         }
@@ -961,15 +1252,15 @@ impl InfluenceEngine {
         println!("\n── Territory summary ──────────────────────────────────────────────────");
         println!(
             "  White‑held (> +0.10):  {:>3} squares   Σcontrol = {:+7.2}   ≈ {:+6.0} cp",
-            w_sq,
-            w_sum,
-            w_sum * cp.territory_weight
+                 w_sq,
+                 w_sum,
+                 w_sum * cp.territory_weight
         );
         println!(
             "  Black‑held (< −0.10):  {:>3} squares   Σcontrol = {:+7.2}   ≈ {:+6.0} cp",
-            b_sq,
-            b_sum,
-            b_sum * cp.territory_weight
+                 b_sq,
+                 b_sum,
+                 b_sum * cp.territory_weight
         );
         println!("  Contested / neutral :  {:>3} squares", n_sq);
 
@@ -988,8 +1279,8 @@ impl InfluenceEngine {
         if !threats.is_empty() {
             threats.sort_by(|a, b| {
                 b.3.abs()
-                    .partial_cmp(&a.3.abs())
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                .partial_cmp(&a.3.abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
             });
             println!("\n── Pieces under pressure (threat‑term contributors) ───────────────────");
             println!(
@@ -1003,16 +1294,16 @@ impl InfluenceEngine {
                     "B"
                 };
                 let nm = cm
-                    .get_piece_by_index(p.piece_type)
-                    .map(|c| c.display_name.clone())
-                    .unwrap_or_default();
+                .get_piece_by_index(p.piece_type)
+                .map(|c| c.display_name.clone())
+                .unwrap_or_default();
                 println!(
                     "  {:<5}{:<18}{:>+9.2}{:>+9.2}{:>+14.1}",
                     square_name(*r, *c, rows),
-                    format!("{nm} ({side})"),
-                    ctl,
-                    th,
-                    th * cp.territory_weight
+                         format!("{nm} ({side})"),
+                             ctl,
+                         th,
+                         th * cp.territory_weight
                 );
             }
             if threats.len() > 12 {
@@ -1024,8 +1315,8 @@ impl InfluenceEngine {
         let mut fps: Vec<&PieceFootprint> = bd.footprints.iter().collect();
         fps.sort_by(|a, b| {
             b.influence_projected
-                .partial_cmp(&a.influence_projected)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            .partial_cmp(&a.influence_projected)
+            .unwrap_or(std::cmp::Ordering::Equal)
         });
         println!("\n── Per‑piece attack footprint (sorted by influence projected) ─────────");
         println!(
@@ -1039,16 +1330,16 @@ impl InfluenceEngine {
                 "B"
             };
             let nm = cm
-                .get_piece_by_index(fp.piece_type)
-                .map(|c| c.display_name.clone())
-                .unwrap_or_default();
+            .get_piece_by_index(fp.piece_type)
+            .map(|c| c.display_name.clone())
+            .unwrap_or_default();
             println!(
                 "  {:<5}{:<18}{:>9}{:>12.3}{:>16.2}",
                 square_name(fp.pos.0, fp.pos.1, rows),
-                format!("{nm} ({side})"),
-                fp.squares_attacked,
-                bd.influence[fp.piece_type],
-                fp.influence_projected
+                     format!("{nm} ({side})"),
+                         fp.squares_attacked,
+                     bd.influence[fp.piece_type],
+                     fp.influence_projected
             );
         }
         if fps.len() > 24 {
@@ -1088,11 +1379,11 @@ impl InfluenceEngine {
             }
         }
         let piece_values: HashMap<usize, f64> = bd
-            .material_value
-            .iter()
-            .enumerate()
-            .map(|(pt, &v)| (pt, v as f64))
-            .collect();
+        .material_value
+        .iter()
+        .enumerate()
+        .map(|(pt, &v)| (pt, v as f64))
+        .collect();
 
         let material = MaterialAnalysis {
             white_total: bd.material_w as f64,
@@ -1162,11 +1453,11 @@ impl InfluenceEngine {
 
         // ── statistics (basic) ───────────────────────────────────────────
         let weakest = bd
-            .material_value
-            .iter()
-            .copied()
-            .filter(|&v| v > 0.0)
-            .fold(f32::INFINITY, f32::min);
+        .material_value
+        .iter()
+        .copied()
+        .filter(|&v| v > 0.0)
+        .fold(f32::INFINITY, f32::min);
         let weakest = if weakest.is_finite() {
             weakest as f64
         } else {
@@ -1179,11 +1470,11 @@ impl InfluenceEngine {
                 white_total_normalized: bd.material_w as f64 / weakest,
                 black_total_normalized: bd.material_b as f64 / weakest,
                 piece_values_normalized: bd
-                    .material_value
-                    .iter()
-                    .enumerate()
-                    .map(|(pt, &v)| (pt, v as f64 / weakest))
-                    .collect(),
+                .material_value
+                .iter()
+                .enumerate()
+                .map(|(pt, &v)| (pt, v as f64 / weakest))
+                .collect(),
             },
             statistics: PositionStatistics {
                 total_pieces: total_pc as u32,
@@ -1238,27 +1529,16 @@ impl<'a> EvaluatorTrait for InfluenceEvaluator<'a> {
         }
         (d.material_value[piece.piece_type] * 100.0).round() as i32
     }
-}
 
-impl ParameterizedEngine for InfluenceEngine {
-    fn parameter_definitions(&self) -> &'static [ParameterDef] {
-        INFLUENCE_PARAMETERS
-    }
-    fn get_parameters(&self) -> &EngineParameters {
-        &self.parameters
-    }
-    fn set_parameters(&mut self, params: EngineParameters) -> bool {
-        let changed = self.parameters != params;
-        if changed {
-            self.parameters = params;
-            self.cached_params = CachedParams::from(&self.parameters);
-            self.transposition_table.clear();
-        }
-        changed
-    }
-    fn on_parameters_changed(&mut self) {
-        self.cached_params = CachedParams::from(&self.parameters);
-        self.transposition_table.clear();
+    fn contempt(&self) -> i32 { 20 }
+
+    fn evaluate_split(
+        &self,
+        state: &mut GameState,
+        _move_generator: &MoveGenerator,
+        _config_manager: &PieceConfigManager,
+    ) -> Option<(f32, f32)> {
+        self.engine.evaluate_split_position(state)
     }
 }
 
@@ -1272,61 +1552,47 @@ impl ChessEngine for InfluenceEngine {
         self.needs_reinit = true;
     }
     fn best_move(&mut self, params: SearchParams) -> Option<SearchResult> {
-        self.initialize(
-            &params.state.board,
-            params.move_generator,
-            params.config_manager,
-        );
+        self.initialize(&params.state.board, params.move_generator, params.config_manager);
         let evaluator = InfluenceEvaluator { engine: self };
-        let mut search = Search::new(&evaluator);
+        let mut search = if SearchConfig::use_new_search(&self.parameters) {
+            Search::with_config(&evaluator, SearchConfig::from_params(&self.parameters))
+        } else {
+            Search::new(&evaluator)
+        };
         search.set_transposition_table(self.transposition_table.clone());
-
         let depth = if params.depth > 0 { params.depth } else { 4 };
         let result = if let Some(time_limit) = params.time_limit {
-            search.find_best_move_iterative(
-                params.state,
-                params.move_generator,
-                params.config_manager,
-                depth,
-                time_limit,
-            )
+            search.find_best_move_iterative(params.state, params.move_generator, params.config_manager, depth, time_limit)
         } else {
-            search.find_best_move_with_depth(
-                params.state,
-                params.move_generator,
-                params.config_manager,
-                depth,
-            )
+            search.find_best_move_with_depth(params.state, params.move_generator, params.config_manager, depth)
         };
         self.transposition_table = search.get_transposition_table();
         let (best_move, evaluation, depth_reached) = result?;
-
         let mate_in = if evaluation >= 999_000 {
             Some((999_999 - evaluation) / 2)
         } else if evaluation <= -999_000 {
             Some(-((-999_999 - evaluation) / 2))
-        } else {
-            None
-        };
-
-        Some(SearchResult {
-            best_move,
-            evaluation: Evaluation {
-                score: evaluation,
-                mate_in,
-            },
-            depth_reached,
-        })
+        } else { None };
+        Some(SearchResult { best_move, evaluation: Evaluation { score: evaluation, mate_in }, depth_reached })
     }
     fn stop(&mut self) {}
     fn parameter_definitions(&self) -> Option<&'static [ParameterDef]> {
-        Some(ParameterizedEngine::parameter_definitions(self))
+        static MERGED: OnceLock<Vec<ParameterDef>> = OnceLock::new();
+        Some(combined_params(INFLUENCE_PARAMETERS, &MERGED))
     }
+
     fn get_parameters(&self) -> Option<EngineParameters> {
-        Some(ParameterizedEngine::get_parameters(self).clone())
+        Some(self.parameters.clone())
     }
+
     fn set_parameters(&mut self, params: EngineParameters) -> bool {
-        ParameterizedEngine::set_parameters(self, params)
+        let changed = self.parameters != params;
+        if changed {
+            self.parameters = params;
+            self.cached_params = CachedParams::from(&self.parameters);
+            self.transposition_table.clear();
+        }
+        changed
     }
     fn supports_analysis(&self) -> bool {
         true

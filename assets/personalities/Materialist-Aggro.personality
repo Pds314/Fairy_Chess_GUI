@@ -1,0 +1,9 @@
+name: Materialist-Aggro
+base: Influence
+material_weight: 220.0       # Cranked up to prioritize captures
+territory_weight: 3.0        # Dropped significantly to avoid territorial traps
+threat_weight: 0.8           # Higher to make it punish pieces that enter its radius
+control_sharpness: 1.0       # Smoothed out to allow it to "hunt" more effectively
+base_influence: 0.1          # Lowered; it shouldn't care about squares, only targets
+royal_value_factor: 6.0      # Slightly lower so it doesn't just run away
+tempo_bonus: 2.0             # Less reliance on opening momentum

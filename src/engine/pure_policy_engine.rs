@@ -21,7 +21,7 @@ use crate::core::game_state::{ExpandedMove, GameState};
 use crate::core::piece::{Piece, PieceColor};
 use crate::core::position::Position;
 use crate::engine::api::{ChessEngine, Evaluation, SearchParams, SearchResult};
-use crate::engine::parameters::{EngineParameters, ParameterDef, ParameterizedEngine};
+use crate::engine::parameters::{EngineParameters, ParameterDef};
 use crate::move_generator::MoveGenerator;
 use crate::piece_config::PieceConfigManager;
 use std::collections::HashMap;
@@ -1062,26 +1062,7 @@ impl ChessEngine for PurePolicyEngine {
 
     fn set_parameters(&mut self, p: EngineParameters) -> bool {
         let changed = self.parameters != p;
-        if changed {
-            self.parameters = p;
-            // Parameters don't affect the variant cache (piece values are
-            // derived from the variant, not from weights) — no rebuild needed.
-        }
-        changed
-    }
-}
-
-impl ParameterizedEngine for PurePolicyEngine {
-    fn parameter_definitions(&self) -> &'static [ParameterDef] {
-        PURE_POLICY_PARAMETERS
-    }
-    fn get_parameters(&self) -> &EngineParameters {
-        &self.parameters
-    }
-    fn set_parameters(&mut self, p: EngineParameters) -> bool {
-        let changed = self.parameters != p;
         self.parameters = p;
         changed
     }
-    fn on_parameters_changed(&mut self) {}
 }

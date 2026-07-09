@@ -1,0 +1,14 @@
+# pieces.config
+# Format: Display Name / Texture Names / Characters / Moveset / Properties;
+
+
+Knight / knight, horse / N / +%x%* / p;
+Rook / rook, castle, tower / R / +%*,+%*Ou / p;
+Bishop / bishop, elephant / B / x%* / p;
+King / king, mann, lord / K / +,x,<>+E_<>+E_ou / R;
+Queen / queen, lady / Q / +%*,x%* / p;
+Pawn / pawn, soldier / P / ^x!~i,^+_i,^+_^+e_iu / P;
+
+
+
+

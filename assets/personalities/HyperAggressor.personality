@@ -1,0 +1,9 @@
+name: HyperAggressor
+base: Influence
+material_weight: 40.0
+territory_weight: 35.0
+threat_weight: 0.8
+control_sharpness: 1.0
+base_influence: 0.8
+royal_value_factor: 1.5
+tempo_bonus: 30.0

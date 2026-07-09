@@ -3,8 +3,8 @@ use crate::engine::personality;
 use crate::engine::{
     ChessEngine, ControlEngine, DiffusionEngine, FlowEngine, GravityEngine, InfluenceEngine,
     MctsEngine, OutpostEngine, PressureEngine, ProbabilisticSearchEngine, PstEngine,
-    PurePolicyEngine, RandomEngine, SimpleEngine, StaticScoringEngine, SwarmEngine, TacticalEngine,
-    TerritoryEngine, VanguardEngine,
+    PurePolicyEngine, RandomEngine, SentinelEngine, SimpleEngine, StaticScoringEngine, SwarmEngine,
+    TacticalEngine, TerritoryEngine, VanguardEngine,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -26,9 +26,9 @@ pub enum EngineType {
     PurePolicy,
     Vanguard,
     Territory,
-    Influence, // <-- New
-    Control,   // <-- New
-
+    Influence,
+    Control,
+    Sentinel,
     Personality(personality::PersonalityId),
 }
 
@@ -52,13 +52,14 @@ impl EngineType {
             EngineType::PurePolicy,
             EngineType::Vanguard,
             EngineType::Territory,
-            EngineType::Influence, // <-- New
-            EngineType::Control,   // <-- New
+            EngineType::Influence,
+            EngineType::Control,
+            EngineType::Sentinel,
         ];
         v.extend(
             personality::all_ids()
-                .into_iter()
-                .map(EngineType::Personality),
+            .into_iter()
+            .map(EngineType::Personality),
         );
         v
     }
@@ -82,12 +83,12 @@ impl EngineType {
             EngineType::PurePolicy => "Pure Policy Engine",
             EngineType::Vanguard => "Vanguard Engine (Pure Geometric Policy)",
             EngineType::Territory => "Territory Control Engine",
-            EngineType::Influence => "Influence Engine (Raycast Territory)", // <-- New
-            EngineType::Control => "Control Engine (Diminishing Territory)", // <-- New
-
+            EngineType::Influence => "Influence Engine (Raycast Territory)",
+            EngineType::Control => "Control Engine (Diminishing Territory)",
+            EngineType::Sentinel => "Sentinel Engine (Incremental Attack Table)",
             EngineType::Personality(id) => personality::get(*id)
-                .map(|spec| spec.display_name())
-                .unwrap_or("👤 (unknown personality)"),
+            .map(|spec| spec.display_name())
+            .unwrap_or("👤 (unknown personality)"),
         }
     }
 
@@ -110,9 +111,9 @@ impl EngineType {
             EngineType::PurePolicy => Some(Box::new(PurePolicyEngine::new())),
             EngineType::Vanguard => Some(Box::new(VanguardEngine::new())),
             EngineType::Territory => Some(Box::new(TerritoryEngine::new())),
-            EngineType::Influence => Some(Box::new(InfluenceEngine::new())), // <-- New
-            EngineType::Control => Some(Box::new(ControlEngine::new())),     // <-- New
-
+            EngineType::Influence => Some(Box::new(InfluenceEngine::new())),
+            EngineType::Control => Some(Box::new(ControlEngine::new())),
+            EngineType::Sentinel => Some(Box::new(SentinelEngine::new())),
             EngineType::Personality(id) => personality::get(*id).and_then(|spec| spec.create()),
         }
     }

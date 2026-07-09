@@ -1,0 +1,10 @@
+name: Containment-Kill
+base: Influence
+material_weight: 120.0       # Up from 100.0 — give it some killer instinct
+territory_weight: 16.0       # Up from 12.0
+threat_weight: 0.5           # Added threat weight to encourage finishing the game
+control_sharpness: 1.8       # Sharper to make its control more decisive
+base_influence: 0.1
+royal_value_factor: 3.0
+tempo_bonus: 10.0
+

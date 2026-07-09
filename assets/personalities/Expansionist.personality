@@ -1,0 +1,9 @@
+name: Expansionist
+base: Influence
+material_weight: 70.0
+territory_weight: 25.0
+threat_weight: 0.6
+control_sharpness: 1.2
+base_influence: 0.4
+royal_value_factor: 2.5
+tempo_bonus: 15.0

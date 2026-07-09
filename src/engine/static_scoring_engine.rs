@@ -19,7 +19,7 @@
 use crate::core::game_state::{ExpandedMove, GameState};
 use crate::core::piece::PieceColor;
 use crate::engine::api::{ChessEngine, Evaluation, SearchParams, SearchResult};
-use crate::engine::parameters::{EngineParameters, ParameterDef, ParameterizedEngine};
+use crate::engine::parameters::{EngineParameters, ParameterDef};
 use crate::move_generator::MoveGenerator;
 use crate::piece_config::PieceConfigManager;
 use std::collections::{HashMap, HashSet};
@@ -334,27 +334,6 @@ impl StaticScoringEngine {
     }
 }
 
-// ─── ParameterizedEngine ────────────────────────────────────
-impl ParameterizedEngine for StaticScoringEngine {
-    fn parameter_definitions(&self) -> &'static [ParameterDef] {
-        STATIC_SCORING_PARAMETERS
-    }
-
-    fn get_parameters(&self) -> &EngineParameters {
-        &self.parameters
-    }
-
-    fn set_parameters(&mut self, params: EngineParameters) -> bool {
-        let changed = self.parameters != params;
-        if changed {
-            self.parameters = params;
-        }
-        changed
-    }
-
-    fn on_parameters_changed(&mut self) {}
-}
-
 // ─── ChessEngine ────────────────────────────────────────────
 impl ChessEngine for StaticScoringEngine {
     fn name(&self) -> &str {
@@ -409,14 +388,18 @@ impl ChessEngine for StaticScoringEngine {
     }
 
     fn parameter_definitions(&self) -> Option<&'static [ParameterDef]> {
-        Some(ParameterizedEngine::parameter_definitions(self))
+        Some(STATIC_SCORING_PARAMETERS)
     }
 
     fn get_parameters(&self) -> Option<EngineParameters> {
-        Some(ParameterizedEngine::get_parameters(self).clone())
+        Some(self.parameters.clone())
     }
 
     fn set_parameters(&mut self, params: EngineParameters) -> bool {
-        ParameterizedEngine::set_parameters(self, params)
+        let changed = self.parameters != params;
+        if changed {
+            self.parameters = params;
+        }
+        changed
     }
 }

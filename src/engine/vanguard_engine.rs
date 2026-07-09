@@ -5,7 +5,7 @@ use crate::core::game_state::{ExpandedMove, GameState, MateStatus};
 use crate::core::piece::{Piece, PieceColor};
 use crate::core::position::Position;
 use crate::engine::api::{ChessEngine, Evaluation, SearchParams, SearchResult};
-use crate::engine::parameters::{EngineParameters, ParameterDef, ParameterizedEngine};
+use crate::engine::parameters::{EngineParameters, ParameterDef};
 use crate::move_generator::MoveGenerator;
 use crate::piece_config::PieceConfigManager;
 use std::collections::HashMap;
@@ -360,23 +360,6 @@ impl VanguardEngine {
     }
 }
 
-impl ParameterizedEngine for VanguardEngine {
-    fn parameter_definitions(&self) -> &'static [ParameterDef] {
-        VANGUARD_PARAMETERS
-    }
-    fn get_parameters(&self) -> &EngineParameters {
-        &self.parameters
-    }
-    fn set_parameters(&mut self, params: EngineParameters) -> bool {
-        let changed = self.parameters != params;
-        if changed {
-            self.parameters = params;
-        }
-        changed
-    }
-    fn on_parameters_changed(&mut self) {}
-}
-
 impl ChessEngine for VanguardEngine {
     fn name(&self) -> &str {
         "Vanguard Engine (Pure Geometric Policy)"
@@ -435,12 +418,18 @@ impl ChessEngine for VanguardEngine {
     }
 
     fn parameter_definitions(&self) -> Option<&'static [ParameterDef]> {
-        Some(ParameterizedEngine::parameter_definitions(self))
+        Some(VANGUARD_PARAMETERS)
     }
+
     fn get_parameters(&self) -> Option<EngineParameters> {
-        Some(ParameterizedEngine::get_parameters(self).clone())
+        Some(self.parameters.clone())
     }
+
     fn set_parameters(&mut self, params: EngineParameters) -> bool {
-        ParameterizedEngine::set_parameters(self, params)
+        let changed = self.parameters != params;
+        if changed {
+            self.parameters = params;
+        }
+        changed
     }
 }

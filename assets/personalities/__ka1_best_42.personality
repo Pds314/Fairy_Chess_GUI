@@ -1,0 +1,23 @@
+name: 👤 KA1 evolved #42
+engine: 👤 KA1
+material_weight: 80.3175963183561
+territory_weight: 47.09804155770584
+threat_weight: 1.3958025152104854
+control_sharpness: 3.4654456515114824
+base_influence: 0.12456516823055641
+royal_value_factor: 6.0862926284506
+tempo_bonus: 1.9480374316678928
+promotion_influence: 0.4766344993228153
+king_attack_weight: 10.936553812743327
+search_use_improved: 0.5856535932060961
+search_best_first_ordering: 0
+search_best_first_search: 0
+search_bfs_max_nodes: 50000
+search_bfs_max_depth: 64
+search_bfs_compact_moves: 0
+search_delta_quiescence: 0
+search_delta_q_threshold: 50
+search_depth_decay_factor: 0.9325243397556495
+search_use_aspiration: 0.44281932119784684
+search_multiplicative_eval: 0.1905387351217298
+search_relative_history: 0.4077115285218119

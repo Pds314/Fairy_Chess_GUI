@@ -1,10 +1,10 @@
 # Cargo.toml
 [package]
 name = "fairy_chess_gui"
-version = "1.0.6"
+version = "1.0.8"
 edition = "2024"
 authors = ["Peter Smythe <Pds3.14@gmail.com>"]
-repository = ""
+repository = "https://github.com/Pds314/Fairy_Chess_GUI"
 license = "MIT"
 
 
@@ -13,3 +13,6 @@ iced = { version = "0.13.1", features = ["canvas", "tokio", "image", "wgpu"] }
 rand = "0.9.1"
 chrono = "0.4"
 smallvec = "1.11"
+
+[dev-dependencies]
+tempfile = "3.10"

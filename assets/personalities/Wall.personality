@@ -1,0 +1,9 @@
+name: Wall
+base: Influence
+material_weight: 150.0
+territory_weight: 5.0
+threat_weight: 1.2
+control_sharpness: 2.5
+base_influence: 0.1
+royal_value_factor: 6.0
+tempo_bonus: 0.0

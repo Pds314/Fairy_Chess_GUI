@@ -1,17 +1,17 @@
-// src/engine/pst_engine.rs
 use crate::core::GameState;
 use crate::core::board::Board;
 use crate::core::piece::{Piece, PieceColor};
 use crate::core::position::Position;
 use crate::engine::api::{ChessEngine, Evaluation, SearchParams, SearchResult};
 use crate::engine::evaluator::EvaluatorTrait;
-use crate::engine::parameters::{EngineParameters, ParameterDef, ParameterizedEngine};
-use crate::engine::search::Search;
+use crate::engine::parameters::{EngineParameters, ParameterDef};
+use crate::engine::search::{combined_params, Search, SearchConfig};
 use crate::move_generator::{MoveGenerator, MoveWithPath};
 use crate::piece_config::PieceConfigManager;
 use crate::promotion::PromotionManager;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 // ─────────────────────────────────────────────────────────────────────────
 // Parameter IDs
@@ -43,116 +43,116 @@ pub static PST_PARAMETERS: &[ParameterDef] = &[
         0.05,
         0.01,
     ),
-    ParameterDef::new(
-        PARAM_ADDITIVE_SWARM,
-        "Swarm Bonus",
-        "Flat bonus added near enemy king. Higher = any piece joins attacks.",
-        0.0,
-        2.0,
-        0.5,
-        0.01,
-    ),
-    ParameterDef::new(
-        PARAM_HUDDLE_BONUS,
-        "Huddle Bonus",
-        "Bonus for pieces near your own king. Higher = more defensive play.",
-        0.0,
-        1.0,
-        0.0,
-        0.01,
-    ),
-    ParameterDef::new(
-        PARAM_MOBILITY_WEIGHT,
-        "Mobility Weight",
-        "How much current position mobility matters vs future potential.",
-        0.0,
-        2.0,
-        1.0,
-        0.01,
-    ),
-    ParameterDef::new(
-        PARAM_FUTURE_MOBILITY_DISCOUNT,
-        "Future Discount",
-        "Discount factor for future moves (lower = less long-term thinking).",
-        0.01,
-        0.99,
-        0.65,
-        0.01,
-    ),
-    ParameterDef::new(
-        PARAM_PIECE_INTRINSIC_WEIGHT,
-        "Intrinsic Value Weight",
-        "Weight for piece's inherent value vs positional value. Higher = piece type matters more.",
-        0.0,
-        2.0,
-        1.0,
-        0.01,
-    ),
-    ParameterDef::new(
-        PARAM_GRAVITY_BONUS,
-        "Gravity Bonus",
-        "Bonus for pieces closer to center of mass of all pieces. Higher = prefers central clustering.",
-        0.0,
-        5.0,
-        0.0,
-        0.01,
-    ),
-    ParameterDef::new(
-        PARAM_PROMOTION_DAMPENER,
-        "Promotion Dampener",
-        "Multiplier for promotion bonuses. 0.5 = cautious, 1.0 = highly aggressive.",
-        0.0,
-        2.0,
-        0.55,
-        0.01,
-    ),
-    ParameterDef::new(
-        PARAM_MIDGAME_STRUCTURAL_FACTOR,
-        "Midgame Density Discount",
-        "Discounts midgame blocking probability.",
-        0.0,
-        1.0,
-        0.8,
-        0.01,
-    ),
-    ParameterDef::new(
-        PARAM_ENDGAME_STRUCTURAL_FACTOR,
-        "Endgame Density Discount",
-        "Discounts endgame blocking.",
-        0.0,
-        1.0,
-        1.0,
-        0.01,
-    ),
-    // ── Safety Parameters ────────────────────────────────────────────────
-    ParameterDef::new(
-        PARAM_PIECE_PROXIMITY_OFFENSIVE,
-        "Piece Proximity Offensive",
-        "Bonus for pieces near high-value enemy pieces (swarming targets). 0 = disabled.",
-        0.0,
-        2.0,
-        0.0,
-        0.01,
-    ),
-    ParameterDef::new(
-        PARAM_PIECE_PROXIMITY_DEFENSIVE,
-        "Piece Proximity Defensive",
-        "Penalty when enemy pieces are near our high-value pieces (vulnerability). 0 = disabled.",
-        0.0,
-        2.0,
-        0.0,
-        0.01,
-    ),
-    ParameterDef::new(
-        PARAM_PST_CROWDING_PENALTY,
-        "PST Crowding Penalty",
-        "Penalizes valuable pieces on high-value squares when many enemy pieces can reach those squares. \
+ParameterDef::new(
+    PARAM_ADDITIVE_SWARM,
+    "Swarm Bonus",
+    "Flat bonus added near enemy king. Higher = any piece joins attacks.",
+    0.0,
+    2.0,
+    0.5,
+    0.01,
+),
+ParameterDef::new(
+    PARAM_HUDDLE_BONUS,
+    "Huddle Bonus",
+    "Bonus for pieces near your own king. Higher = more defensive play.",
+    0.0,
+    1.0,
+    0.0,
+    0.01,
+),
+ParameterDef::new(
+    PARAM_MOBILITY_WEIGHT,
+    "Mobility Weight",
+    "How much current position mobility matters vs future potential.",
+    0.0,
+    2.0,
+    1.0,
+    0.01,
+),
+ParameterDef::new(
+    PARAM_FUTURE_MOBILITY_DISCOUNT,
+    "Future Discount",
+    "Discount factor for future moves (lower = less long-term thinking).",
+                  0.01,
+                  0.99,
+                  0.65,
+                  0.01,
+),
+ParameterDef::new(
+    PARAM_PIECE_INTRINSIC_WEIGHT,
+    "Intrinsic Value Weight",
+    "Weight for piece's inherent value vs positional value. Higher = piece type matters more.",
+    0.0,
+    2.0,
+    1.0,
+    0.01,
+),
+ParameterDef::new(
+    PARAM_GRAVITY_BONUS,
+    "Gravity Bonus",
+    "Bonus for pieces closer to center of mass of all pieces. Higher = prefers central clustering.",
+    0.0,
+    5.0,
+    0.0,
+    0.01,
+),
+ParameterDef::new(
+    PARAM_PROMOTION_DAMPENER,
+    "Promotion Dampener",
+    "Multiplier for promotion bonuses. 0.5 = cautious, 1.0 = highly aggressive.",
+    0.0,
+    2.0,
+    0.55,
+    0.01,
+),
+ParameterDef::new(
+    PARAM_MIDGAME_STRUCTURAL_FACTOR,
+    "Midgame Density Discount",
+    "Discounts midgame blocking probability.",
+    0.0,
+    1.0,
+    0.8,
+    0.01,
+),
+ParameterDef::new(
+    PARAM_ENDGAME_STRUCTURAL_FACTOR,
+    "Endgame Density Discount",
+    "Discounts endgame blocking.",
+    0.0,
+    1.0,
+    1.0,
+    0.01,
+),
+// ── Safety Parameters ────────────────────────────────────────────────
+ParameterDef::new(
+    PARAM_PIECE_PROXIMITY_OFFENSIVE,
+    "Piece Proximity Offensive",
+    "Bonus for pieces near high-value enemy pieces (swarming targets). 0 = disabled.",
+                  0.0,
+                  2.0,
+                  0.0,
+                  0.01,
+),
+ParameterDef::new(
+    PARAM_PIECE_PROXIMITY_DEFENSIVE,
+    "Piece Proximity Defensive",
+    "Penalty when enemy pieces are near our high-value pieces (vulnerability). 0 = disabled.",
+                  0.0,
+                  2.0,
+                  0.0,
+                  0.01,
+),
+ParameterDef::new(
+    PARAM_PST_CROWDING_PENALTY,
+    "PST Crowding Penalty",
+    "Penalizes valuable pieces on high-value squares when many enemy pieces can reach those squares. \
 Scales quadratically with piece value, so queens are penalized much more than pawns. 0 = disabled.",
-        0.0,
-        100.0,
-        0.0,
-        0.01,
-    ),
+0.0,
+100.0,
+0.0,
+0.01,
+),
 ];
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -245,7 +245,7 @@ impl SwarmTables {
 
     fn is_cache_valid(&self, white_royals: &[Position], black_royals: &[Position]) -> bool {
         self.cached_white_royals.as_slice() == white_royals
-            && self.cached_black_royals.as_slice() == black_royals
+        && self.cached_black_royals.as_slice() == black_royals
     }
 
     fn recompute(
@@ -413,7 +413,7 @@ impl PieceProximityTables {
                             });
                             // FNV-1a hash: mix position and value bits
                             fingerprint ^= (flat as u64).wrapping_mul(0x100000001b3u64)
-                                ^ (val.to_bits() as u64).wrapping_mul(0x517cc1b727220a95u64);
+                            ^ (val.to_bits() as u64).wrapping_mul(0x517cc1b727220a95u64);
                             fingerprint = fingerprint.wrapping_mul(0x100000001b3u64);
                         }
                     }
@@ -563,7 +563,7 @@ impl PieceProximityTables {
 //
 //   During evaluation: crowding_penalty(piece, square) =
 //     crowding_weight
-//     * (piece_intrinsic / max_intrinsic)^2   ← quadratic: queens hurt much more
+//     * (piece_intrinsic / max_intrinsic)^2    ← quadratic: queens hurt much more
 //     * pst_percentile(piece, square)          ← only penalize genuinely good squares
 //     * contest_score(square)                  ← enemy pressure on this square
 //     * crowding_phase                         ← less penalty in endgame
@@ -602,11 +602,11 @@ fn compute_contest_scores(
         if config_manager
             .get_piece_by_index(piece_type)
             .map_or(false, |c| c.properties.is_royal || c.properties.is_royalty)
-        {
-            continue;
-        }
+            {
+                continue;
+            }
 
-        let piece_rel_value = intrinsic_values[piece_type] / max_intrinsic;
+            let piece_rel_value = intrinsic_values[piece_type] / max_intrinsic;
 
         // For each square, can this piece type attack it?
         // We use the reverse: from each square, generate theoretical moves
@@ -616,10 +616,10 @@ fn compute_contest_scores(
             for c in 0..cols {
                 let moves = move_generator.generate_theoretical_moves_for_pst(
                     (r, c),
-                    piece_type,
-                    PieceColor::White, // color doesn't matter for coverage
-                    board_size,
-                    1, // treat as moved
+                                                                              piece_type,
+                                                                              PieceColor::White, // color doesn't matter for coverage
+                                                                              board_size,
+                                                                              1, // treat as moved
                 );
                 for mv in &moves {
                     if mv.rule.can_land_enemy {
@@ -913,9 +913,9 @@ impl EvalData {
         // stable. See the field doc for why we don't interpolate the max.
         let max_mid = intrinsic_values.iter().cloned().fold(0.0f32, f32::max);
         let max_end = endgame_intrinsic_values
-            .iter()
-            .cloned()
-            .fold(0.0f32, f32::max);
+        .iter()
+        .cloned()
+        .fold(0.0f32, f32::max);
         let max_intrinsic = max_mid.max(max_end).max(0.001);
 
         // Contest scores use midgame intrinsics. This is acceptable:
@@ -953,15 +953,15 @@ impl EvalData {
         // which half a piece falls in.
         let hvp_value_threshold = {
             let mut non_royal: Vec<f32> = intrinsic_values
-                .iter()
-                .enumerate()
-                .filter(|(idx, _)| {
-                    !config_manager
-                        .get_piece_by_index(*idx)
-                        .map_or(true, |c| c.properties.is_royal || c.properties.is_royalty)
-                })
-                .map(|(_, &v)| v)
-                .collect();
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| {
+                !config_manager
+                .get_piece_by_index(*idx)
+                .map_or(true, |c| c.properties.is_royal || c.properties.is_royalty)
+            })
+            .map(|(_, &v)| v)
+            .collect();
             if non_royal.is_empty() {
                 f32::MAX
             } else {
@@ -1030,9 +1030,9 @@ impl EvalData {
         col: usize,
     ) -> f32 {
         let idx = piece_type * self.pst_percentile_stride
-            + color_idx * (self.board_size.0 * self.board_size.1)
-            + row * self.board_size.1
-            + col;
+        + color_idx * (self.board_size.0 * self.board_size.1)
+        + row * self.board_size.1
+        + col;
         if idx < self.pst_percentiles.len() {
             unsafe { *self.pst_percentiles.get_unchecked(idx) }
         } else {
@@ -1089,10 +1089,10 @@ fn compute_square_value(
     piece_type: usize,
     color: PieceColor,
     board_size: (usize, usize),
-    empty_prob: f64,
-    future_discount: f64,
-    mobility_weight: f64,
-    move_generator: &MoveGenerator,
+                        empty_prob: f64,
+                        future_discount: f64,
+                        mobility_weight: f64,
+                        move_generator: &MoveGenerator,
 ) -> f64 {
     let mut total_value = 0.0_f64;
     let mut depth = 0usize;
@@ -1119,7 +1119,7 @@ fn compute_square_value(
                 total_scoring += probability * contrib.scoring_weight;
                 total_diffusion += probability * contrib.diffusion_weight;
                 *next_positions.entry(contrib.destination).or_insert(0.0) +=
-                    probability * contrib.diffusion_weight;
+                probability * contrib.diffusion_weight;
             }
         }
 
@@ -1175,18 +1175,18 @@ fn compute_square_value(
 fn blend_promotion_into_pst(
     pst: &mut FlatPst,
     board_size: (usize, usize),
-    future_discount: f64,
-    promo_dampener: f64,
-    num_pieces: usize,
-    _move_generator: &MoveGenerator,
-    config_manager: &PieceConfigManager,
+                            future_discount: f64,
+                            promo_dampener: f64,
+                            num_pieces: usize,
+                            _move_generator: &MoveGenerator,
+                            config_manager: &PieceConfigManager,
 ) {
     let (rows, cols) = board_size;
 
     for piece_type in 0..num_pieces {
         let can_promote = config_manager
-            .get_piece_by_index(piece_type)
-            .map_or(false, |c| c.properties.can_promote);
+        .get_piece_by_index(piece_type)
+        .map_or(false, |c| c.properties.can_promote);
         if !can_promote {
             continue;
         }
@@ -1205,10 +1205,10 @@ fn blend_promotion_into_pst(
                     continue;
                 }
                 let avg: f32 = (0..rows)
-                    .flat_map(|r| (0..cols).map(move |c| (r, c)))
-                    .map(|(r, c)| pst.get(t, color_idx, r, c))
-                    .sum::<f32>()
-                    / (rows * cols) as f32;
+                .flat_map(|r| (0..cols).map(move |c| (r, c)))
+                .map(|(r, c)| pst.get(t, color_idx, r, c))
+                .sum::<f32>()
+                / (rows * cols) as f32;
                 if avg > best_avg {
                     best_avg = avg;
                     best_target = t;
@@ -1283,7 +1283,29 @@ impl<'a> EvaluatorTrait for PstEvaluator<'a> {
         }
         let phase = data.current_phase;
         (data.get_interpolated(piece.piece_type, piece.color.index(), pos.0, pos.1, phase) * 100.0)
-            as i32
+        as i32
+    }
+
+    fn delta_pruning_margin(&self) -> i32 {
+        2000
+    }
+    fn aspiration_window(&self) -> i32 {
+        500
+    }
+
+    fn contempt(&self) -> i32 { 250 }
+
+    fn evaluate_split(
+        &self,
+        state: &mut GameState,
+        _move_generator: &MoveGenerator,
+        config_manager: &PieceConfigManager,
+    ) -> Option<(f32, f32)> {
+        let (w, b) = self.engine.white_black_scores(state, config_manager);
+        Some(match state.current_turn {
+            PieceColor::White => (w, b),
+             PieceColor::Black => (b, w),
+        })
     }
 }
 
@@ -1300,10 +1322,12 @@ pub struct PstEngine {
 
 impl PstEngine {
     pub fn new() -> Self {
+        static MERGED: OnceLock<Vec<ParameterDef>> = OnceLock::new();
+        let defs = combined_params(PST_PARAMETERS, &MERGED);
         Self {
             eval_data: RefCell::new(None),
             transposition_table: HashMap::new(),
-            parameters: EngineParameters::from_defaults(PST_PARAMETERS),
+            parameters: EngineParameters::from_defaults(defs),
             needs_reinit: true,
         }
     }
@@ -1322,8 +1346,8 @@ impl PstEngine {
         let needs_rebuild = {
             let data = self.eval_data.borrow();
             self.needs_reinit
-                || data.is_none()
-                || data.as_ref().map_or(true, |d| d.board_size != board_size)
+            || data.is_none()
+            || data.as_ref().map_or(true, |d| d.board_size != board_size)
         };
 
         if !needs_rebuild {
@@ -1364,8 +1388,16 @@ impl PstEngine {
     pub fn evaluate_position(
         &self,
         state: &GameState,
-        _config_manager: &PieceConfigManager,
+        config_manager: &PieceConfigManager,
     ) -> f32 {
+        let (white, black) = self.white_black_scores(state, config_manager);
+        match state.current_turn {
+            PieceColor::White => white - black,
+            PieceColor::Black => black - white,
+        }
+    }
+
+    pub fn white_black_scores(&self, state: &GameState, _config_manager: &PieceConfigManager) -> (f32, f32) {
         let offensive_weight = self.get_param(PARAM_PIECE_PROXIMITY_OFFENSIVE, 0.0) as f32;
         let defensive_weight = self.get_param(PARAM_PIECE_PROXIMITY_DEFENSIVE, 0.0) as f32;
         let crowding_weight = self.get_param(PARAM_PST_CROWDING_PENALTY, 0.0) as f32;
@@ -1384,7 +1416,7 @@ impl PstEngine {
             let mut data_mut = self.eval_data.borrow_mut();
             let data = match data_mut.as_mut() {
                 Some(d) => d,
-                None => return 0.0,
+                None => return (0.0, 0.0),
             };
 
             // Store the phase. This is what get_piece_value_on_square
@@ -1432,12 +1464,12 @@ impl PstEngine {
         let data_ref = self.eval_data.borrow();
         let data = match data_ref.as_ref() {
             Some(d) => d,
-            None => return 0.0,
+            None => return (0.0, 0.0),
         };
 
         let (rows, cols) = data.board_size;
         if (rows, cols) != state.board.size() {
-            return 0.0;
+            return (0.0, 0.0);
         }
 
         let gravity_bonus = self.get_param(PARAM_GRAVITY_BONUS, 0.0) as f32;
@@ -1457,7 +1489,8 @@ impl PstEngine {
         // loop. max_intrinsic is phase-invariant (see field docs).
         let inv_max_intrinsic = 1.0 / data.max_intrinsic;
 
-        let mut total_score = 0.0_f32;
+        let mut white_total = 0.0_f32;
+        let mut black_total = 0.0_f32;
 
         for row in 0..rows {
             for col in 0..cols {
@@ -1502,11 +1535,6 @@ impl PstEngine {
                 // val_sq now computed inline from the interpolated
                 // intrinsic. Replaces the precomputed value_sq_normalized
                 // table, which was frozen at midgame values.
-                //
-                //   val_sq = (interpolated_intrinsic / max_intrinsic)^2
-                //
-                // Cost: one interpolation (already cheap) + one multiply
-                // (the hoisted reciprocal) + one square. ~4 ops per piece.
                 let crowding_pen = if has_crowding && crowding_phase > 0.0 {
                     let intrinsic = data.intrinsic_interpolated(piece.piece_type, phase);
                     let norm = intrinsic * inv_max_intrinsic;
@@ -1530,15 +1558,15 @@ impl PstEngine {
 
                 let square_score = adjusted + proximity_delta - crowding_pen + gravity;
 
-                if piece.color == state.current_turn {
-                    total_score += square_score;
+                if piece.color == PieceColor::White {
+                    white_total += square_score;
                 } else {
-                    total_score -= square_score;
+                    black_total += square_score;
                 }
             }
         }
 
-        total_score
+        (white_total, black_total)
     }
 
     /// Public PST value query. Uses the cached phase so analysis displays
@@ -1607,13 +1635,13 @@ impl PstEngine {
         let mut mobility_analysis = self.analyze_mobility(state, move_generator, config_manager);
 
         mobility_analysis.theoretical_mobility =
-            self.analyze_theoretical_mobility(move_generator, config_manager, &state.board);
+        self.analyze_theoretical_mobility(move_generator, config_manager, &state.board);
         mobility_analysis.threat_analysis =
-            self.analyze_threats(state, move_generator, config_manager);
+        self.analyze_threats(state, move_generator, config_manager);
 
         let density_analysis = self.analyze_density(state, config_manager);
         let statistical_analysis =
-            self.analyze_statistics(state, config_manager, &material_analysis);
+        self.analyze_statistics(state, config_manager, &material_analysis);
 
         PositionAnalysis {
             material_values: material_analysis,
@@ -1640,7 +1668,7 @@ impl PstEngine {
             for col in 0..state.board.size().1 {
                 if let Some(piece) = state.board.get_piece((row, col)) {
                     let piece_value =
-                        self.get_pst_value(&piece, (row, col)).unwrap_or(100) as f64 / 100.0;
+                    self.get_pst_value(&piece, (row, col)).unwrap_or(100) as f64 / 100.0;
                     let (wc, bc) = piece_counts.entry(piece.piece_type).or_insert((0, 0));
                     match piece.color {
                         PieceColor::White => {
@@ -1658,17 +1686,17 @@ impl PstEngine {
         }
 
         let piece_values: HashMap<usize, f64> = piece_sums
-            .iter()
-            .filter_map(|(&pt, &sum)| {
-                let (wc, bc) = piece_counts.get(&pt)?;
-                let total = (wc + bc) as f64;
-                if total > 0.0 {
-                    Some((pt, sum / total))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        .iter()
+        .filter_map(|(&pt, &sum)| {
+            let (wc, bc) = piece_counts.get(&pt)?;
+            let total = (wc + bc) as f64;
+            if total > 0.0 {
+                Some((pt, sum / total))
+            } else {
+                None
+            }
+        })
+        .collect();
 
         MaterialAnalysis {
             white_total,
@@ -1698,10 +1726,10 @@ impl PstEngine {
                     variance_analysis: VarianceAnalysis {
                         positional_bias: PositionalBias {
                             forward_bias: 0.0,
-                            backward_bias: 0.0,
-                            center_bias: 0.0,
-                            edge_bias: 0.0,
-                            left_right_bias: 0.0,
+                                backward_bias: 0.0,
+                                center_bias: 0.0,
+                                edge_bias: 0.0,
+                                left_right_bias: 0.0,
                         },
                         value_distribution: ValueDistribution {
                             highest_value_squares: vec![],
@@ -1751,7 +1779,7 @@ impl PstEngine {
             let max_v = all_vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
             let avg_v = all_vals.iter().sum::<f64>() / all_vals.len() as f64;
             let var =
-                all_vals.iter().map(|v| (v - avg_v).powi(2)).sum::<f64>() / all_vals.len() as f64;
+            all_vals.iter().map(|v| (v - avg_v).powi(2)).sum::<f64>() / all_vals.len() as f64;
             piece_pst_stats.insert(
                 piece_type,
                 PiecePstStats {
@@ -1761,9 +1789,9 @@ impl PstEngine {
                     average_value: avg_v,
                     variance: var,
                     standard_deviation: var.sqrt(),
-                    current_total: 0.0,
-                    current_count: 0,
-                    current_average: 0.0,
+                                   current_total: 0.0,
+                                   current_count: 0,
+                                   current_average: 0.0,
                 },
             );
         }
@@ -1774,9 +1802,9 @@ impl PstEngine {
                     let v = data.get_interpolated(
                         piece.piece_type,
                         piece.color.index(),
-                        row,
-                        col,
-                        phase,
+                                                  row,
+                                                  col,
+                                                  phase,
                     ) as f64;
                     match piece.color {
                         PieceColor::White => white_pst_total += v,
@@ -1808,7 +1836,7 @@ impl PstEngine {
         &self,
         data: &EvalData,
         board_size: (usize, usize),
-        phase: f32,
+                                  phase: f32,
     ) -> crate::engine::analysis::VarianceAnalysis {
         use crate::engine::analysis::*;
 
@@ -1826,7 +1854,7 @@ impl PstEngine {
                 for row in 0..rows {
                     for col in 0..cols {
                         let v =
-                            data.get_interpolated(piece_type, color_idx, row, col, phase) as f64;
+                        data.get_interpolated(piece_type, color_idx, row, col, phase) as f64;
                         all_values.push(v);
                         value_positions.push(((row, col), v));
 
@@ -1842,7 +1870,7 @@ impl PstEngine {
                         }
 
                         let cd = ((row as f64 - (rows - 1) as f64 / 2.0).powi(2)
-                            + (col as f64 - (cols - 1) as f64 / 2.0).powi(2))
+                        + (col as f64 - (cols - 1) as f64 / 2.0).powi(2))
                         .sqrt();
                         let max_d = ((rows as f64).powi(2) + (cols as f64).powi(2)).sqrt() / 2.0;
                         center_bias += v * (1.0 - cd / max_d);
@@ -1870,21 +1898,21 @@ impl PstEngine {
 
         let range = if !all_values.is_empty() {
             all_values.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
-                - all_values.iter().cloned().fold(f64::INFINITY, f64::min)
+            - all_values.iter().cloned().fold(f64::INFINITY, f64::min)
         } else {
             0.0
         };
         let mean = all_values.iter().sum::<f64>() / all_values.len().max(1) as f64;
         let var = all_values.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
-            / all_values.len().max(1) as f64;
+        / all_values.len().max(1) as f64;
 
         VarianceAnalysis {
             positional_bias: PositionalBias {
                 forward_bias,
-                backward_bias,
-                center_bias,
-                edge_bias,
-                left_right_bias,
+                    backward_bias,
+                    center_bias,
+                    edge_bias,
+                    left_right_bias,
             },
             value_distribution: ValueDistribution {
                 highest_value_squares: highest,
@@ -1914,7 +1942,7 @@ impl PstEngine {
                 let flat = row * cols + col;
                 for color_idx in 0..2 {
                     let s =
-                        (swarm.get_mult(color_idx, flat) + swarm.get_add(color_idx, flat)) as f64;
+                    (swarm.get_mult(color_idx, flat) + swarm.get_add(color_idx, flat)) as f64;
                     let h = swarm.get_huddle(color_idx, flat) as f64;
                     total_swarm += s;
                     total_huddle += h;
@@ -1958,9 +1986,9 @@ impl PstEngine {
         };
 
         let all_moves: Vec<_> = current_moves
-            .into_iter()
-            .chain(opponent_moves.into_iter())
-            .collect();
+        .into_iter()
+        .chain(opponent_moves.into_iter())
+        .collect();
 
         let mut piece_counts_total: HashMap<usize, u32> = HashMap::new();
         for row in 0..state.board.size().0 {
@@ -1998,7 +2026,7 @@ impl PstEngine {
                     average_mobility: avg,
                     mobility_variance: 0.0,
                     attacking_moves: piece_attacking.get(&pt).copied().unwrap_or(0),
-                    non_attacking_moves: piece_non_attacking.get(&pt).copied().unwrap_or(0),
+                                  non_attacking_moves: piece_non_attacking.get(&pt).copied().unwrap_or(0),
                 },
             );
         }
@@ -2046,7 +2074,7 @@ impl PstEngine {
                 if let Some(piece) = state.board.get_piece((row, col)) {
                     if piece.color == color {
                         total +=
-                            self.get_pst_value(&piece, (row, col)).unwrap_or(100) as f64 / 100.0;
+                        self.get_pst_value(&piece, (row, col)).unwrap_or(100) as f64 / 100.0;
                     }
                 }
             }
@@ -2077,8 +2105,8 @@ impl PstEngine {
 
         let density = (initial_pieces / total_sq).min(0.9);
         let mid_structural = self
-            .parameters
-            .get_or_default(PARAM_MIDGAME_STRUCTURAL_FACTOR, 0.8);
+        .parameters
+        .get_or_default(PARAM_MIDGAME_STRUCTURAL_FACTOR, 0.8);
         let empty_prob = 1.0 - density * mid_structural;
 
         let center_row = rows / 2;
@@ -2097,37 +2125,37 @@ impl PstEngine {
                 for col in 0..cols {
                     let moves = move_generator.generate_theoretical_moves_for_pst(
                         (row, col),
-                        piece_type,
-                        PieceColor::White,
-                        board_size,
-                        0,
+                                                                                  piece_type,
+                                                                                  PieceColor::White,
+                                                                                  board_size,
+                                                                                  0,
                     );
                     let mob = moves.len() as u32;
                     min_mob = min_mob.min(mob);
                     max_mob = max_mob.max(mob);
 
                     let blocked_mob = moves
-                        .iter()
-                        .map(|mv| {
-                            let blocking_squares = move_generator.count_blocking_squares(mv);
-                            let blocking = empty_prob.powi(blocking_squares as i32);
-                            if mv.rule.can_land_enemy {
-                                blocking * (1.0 - empty_prob)
-                            } else if mv.rule.can_land_empty {
-                                blocking * empty_prob
-                            } else {
-                                0.0
-                            }
-                        })
-                        .sum::<f64>();
+                    .iter()
+                    .map(|mv| {
+                        let blocking_squares = move_generator.count_blocking_squares(mv);
+                        let blocking = empty_prob.powi(blocking_squares as i32);
+                        if mv.rule.can_land_enemy {
+                            blocking * (1.0 - empty_prob)
+                        } else if mv.rule.can_land_empty {
+                            blocking * empty_prob
+                        } else {
+                            0.0
+                        }
+                    })
+                    .sum::<f64>();
 
                     let is_corner = (row == 0 || row == rows - 1) && (col == 0 || col == cols - 1);
                     let is_edge =
-                        !is_corner && (row == 0 || row == rows - 1 || col == 0 || col == cols - 1);
+                    !is_corner && (row == 0 || row == rows - 1 || col == 0 || col == cols - 1);
                     let is_center = (row as i32 - center_row as i32).abs() <= 1
-                        && (col as i32 - center_col as i32).abs() <= 1
-                        && !is_edge
-                        && !is_corner;
+                    && (col as i32 - center_col as i32).abs() <= 1
+                    && !is_edge
+                    && !is_corner;
 
                     if is_corner {
                         corner_vals.push(blocked_mob);
@@ -2152,12 +2180,12 @@ impl PstEngine {
                 TheoreticalMobilityStats {
                     piece_type,
                     center_mobility: avg(&center_vals),
-                    corner_mobility: avg(&corner_vals),
-                    edge_mobility: avg(&edge_vals),
-                    mobility_variance: 0.0,
-                    concentration_factor: 0.0,
-                    max_mobility: max_mob,
-                    min_mobility: if min_mob == u32::MAX { 0 } else { min_mob },
+                          corner_mobility: avg(&corner_vals),
+                          edge_mobility: avg(&edge_vals),
+                          mobility_variance: 0.0,
+                          concentration_factor: 0.0,
+                          max_mobility: max_mob,
+                          min_mobility: if min_mob == u32::MAX { 0 } else { min_mob },
                 },
             );
         }
@@ -2187,9 +2215,9 @@ impl PstEngine {
             if let Some(cap) = mv.captures {
                 wcap += 1;
                 wt += self
-                    .get_pst_value(&cap, mv.captures_position.unwrap_or(mv.to))
-                    .unwrap_or(100) as f64
-                    / 100.0;
+                .get_pst_value(&cap, mv.captures_position.unwrap_or(mv.to))
+                .unwrap_or(100) as f64
+                / 100.0;
                 if let Some(att) = state.board.get_piece(mv.from) {
                     wat += self.get_pst_value(&att, mv.from).unwrap_or(100) as f64 / 100.0;
                 }
@@ -2203,9 +2231,9 @@ impl PstEngine {
             if let Some(cap) = mv.captures {
                 bcap += 1;
                 bt += self
-                    .get_pst_value(&cap, mv.captures_position.unwrap_or(mv.to))
-                    .unwrap_or(100) as f64
-                    / 100.0;
+                .get_pst_value(&cap, mv.captures_position.unwrap_or(mv.to))
+                .unwrap_or(100) as f64
+                / 100.0;
                 if let Some(att) = state.board.get_piece(mv.from) {
                     bat += self.get_pst_value(&att, mv.from).unwrap_or(100) as f64 / 100.0;
                 }
@@ -2305,30 +2333,30 @@ impl PstEngine {
         };
 
         let isolated: Vec<Position> = positions
-            .iter()
-            .filter(|&&p| {
-                !positions.iter().any(|&q| {
-                    q != p && {
-                        let dr = p.0 as f64 - q.0 as f64;
-                        let dc = p.1 as f64 - q.1 as f64;
-                        (dr * dr + dc * dc).sqrt() <= 2.0
-                    }
-                })
+        .iter()
+        .filter(|&&p| {
+            !positions.iter().any(|&q| {
+                q != p && {
+                    let dr = p.0 as f64 - q.0 as f64;
+                    let dc = p.1 as f64 - q.1 as f64;
+                    (dr * dr + dc * dc).sqrt() <= 2.0
+                }
             })
-            .cloned()
-            .collect();
+        })
+        .cloned()
+        .collect();
 
         let mut dense = Vec::new();
         for row in 0..board_size.0 {
             for col in 0..board_size.1 {
                 let nearby = positions
-                    .iter()
-                    .filter(|&&p| {
-                        let dr = p.0 as f64 - row as f64;
-                        let dc = p.1 as f64 - col as f64;
-                        (dr * dr + dc * dc).sqrt() <= 2.0
-                    })
-                    .count();
+                .iter()
+                .filter(|&&p| {
+                    let dr = p.0 as f64 - row as f64;
+                    let dc = p.1 as f64 - col as f64;
+                    (dr * dr + dc * dc).sqrt() <= 2.0
+                })
+                .count();
                 if nearby >= 3 {
                     dense.push(((row, col), nearby as f64));
                 }
@@ -2359,18 +2387,18 @@ impl PstEngine {
         use crate::engine::analysis::*;
 
         let weakest = material
-            .piece_values
-            .values()
-            .filter(|&&v| v > 0.0)
-            .cloned()
-            .fold(f64::INFINITY, f64::min);
+        .piece_values
+        .values()
+        .filter(|&&v| v > 0.0)
+        .cloned()
+        .fold(f64::INFINITY, f64::min);
         let weakest = if weakest.is_finite() { weakest } else { 1.0 };
 
         let normalized: HashMap<usize, f64> = material
-            .piece_values
-            .iter()
-            .map(|(&pt, &v)| (pt, v / weakest))
-            .collect();
+        .piece_values
+        .iter()
+        .map(|(&pt, &v)| (pt, v / weakest))
+        .collect();
 
         let total_pieces: u32 = material.piece_counts.values().map(|(w, b)| w + b).sum();
         let total_val = material.white_total + material.black_total;
@@ -2450,35 +2478,6 @@ impl PstEngine {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// ParameterizedEngine impl
-// ─────────────────────────────────────────────────────────────────────────
-
-impl ParameterizedEngine for PstEngine {
-    fn parameter_definitions(&self) -> &'static [ParameterDef] {
-        PST_PARAMETERS
-    }
-    fn get_parameters(&self) -> &EngineParameters {
-        &self.parameters
-    }
-
-    fn set_parameters(&mut self, params: EngineParameters) -> bool {
-        let changed = self.parameters != params;
-        if changed {
-            self.parameters = params;
-            self.needs_reinit = true;
-        }
-        changed
-    }
-
-    fn on_parameters_changed(&mut self) {
-        self.needs_reinit = true;
-        *self.eval_data.borrow_mut() = None;
-        self.transposition_table.clear();
-        println!("🔄 PST Engine parameters changed — tables will be recomputed.");
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────
 // ChessEngine impl
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -2494,58 +2493,37 @@ impl ChessEngine for PstEngine {
     }
 
     fn best_move(&mut self, params: SearchParams) -> Option<SearchResult> {
-        self.initialize_psts(
-            &params.state.board,
-            params.move_generator,
-            params.config_manager,
-        );
-
-        // Seed the cached phase from the root position so the very first
-        // order_moves call has a sensible value. Subsequent leaf evals
-        // will keep it fresh throughout the search.
+        self.initialize_psts(&params.state.board, params.move_generator, params.config_manager);
         self.update_phase(&params.state.board);
 
         let evaluator = PstEvaluator { engine: self };
-        let mut search = Search::new(&evaluator);
+        let mut search = if SearchConfig::use_new_search(&self.parameters) {
+            Search::with_config(&evaluator, SearchConfig::from_params(&self.parameters))
+        } else {
+            Search::new(&evaluator)
+        };
         search.set_transposition_table(self.transposition_table.clone());
 
         let depth = if params.depth > 0 { params.depth } else { 4 };
-
         let result = if let Some(time_limit) = params.time_limit {
             search.find_best_move_iterative(
-                params.state,
-                params.move_generator,
-                params.config_manager,
-                depth,
-                time_limit,
+                params.state, params.move_generator, params.config_manager, depth, time_limit,
             )
         } else {
             search.find_best_move_with_depth(
-                params.state,
-                params.move_generator,
-                params.config_manager,
-                depth,
+                params.state, params.move_generator, params.config_manager, depth,
             )
         };
-
         self.transposition_table = search.get_transposition_table();
-
         let (best_move, evaluation, depth_reached) = result?;
-
         let mate_in = if evaluation >= 999000 {
             Some(((999999 - evaluation) / 2) as i32)
         } else if evaluation <= -999000 {
             Some(-((-999999 - evaluation) / 2) as i32)
-        } else {
-            None
-        };
-
+        } else { None };
         Some(SearchResult {
             best_move,
-            evaluation: Evaluation {
-                score: evaluation,
-                mate_in,
-            },
+            evaluation: Evaluation { score: evaluation, mate_in },
             depth_reached,
         })
     }
@@ -2566,14 +2544,22 @@ impl ChessEngine for PstEngine {
     }
 
     fn parameter_definitions(&self) -> Option<&'static [ParameterDef]> {
-        Some(ParameterizedEngine::parameter_definitions(self))
+        static MERGED: OnceLock<Vec<ParameterDef>> = OnceLock::new();
+        Some(combined_params(PST_PARAMETERS, &MERGED))
     }
 
     fn get_parameters(&self) -> Option<EngineParameters> {
-        Some(ParameterizedEngine::get_parameters(self).clone())
+        Some(self.parameters.clone())
     }
 
+    // PstEngine::set_parameters
     fn set_parameters(&mut self, params: EngineParameters) -> bool {
-        ParameterizedEngine::set_parameters(self, params)
+        let changed = self.parameters != params;
+        if changed {
+            self.parameters = params;
+            self.needs_reinit = true;
+            self.transposition_table.clear(); // avoid mixing eval scales across modes
+        }
+        changed
     }
 }

@@ -1,21 +1,28 @@
 // src/engine/simple_engine.rs
-use crate::engine::api::{ChessEngine, Evaluation, SearchParams, SearchResult};
-use crate::engine::evaluator::{Evaluator, EvaluatorTrait};
-use crate::engine::search::Search;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use crate::engine::api::{ChessEngine, SearchParams, SearchResult};
+use crate::engine::evaluator::Evaluator;
+use crate::engine::parameters::{EngineParameters, ParameterDef};
+use crate::engine::search::{run_search, TTEntry, SEARCH_PARAMETER_DEFS};
+use std::collections::HashMap;
 
 pub struct SimpleEngine {
-    stop_flag: Arc<AtomicBool>,
-    search: Option<Search<'static, Evaluator>>, // Use the concrete Evaluator type
+    /// Persisted between moves so the TT accumulates across the game.
+    transposition_table: HashMap<u64, TTEntry>,
+    parameters: EngineParameters,
 }
 
 impl SimpleEngine {
     pub fn new() -> Self {
         SimpleEngine {
-            stop_flag: Arc::new(AtomicBool::new(false)),
-            search: None,
+            transposition_table: HashMap::new(),
+            parameters: EngineParameters::from_defaults(SEARCH_PARAMETER_DEFS),
         }
+    }
+}
+
+impl Default for SimpleEngine {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -25,57 +32,37 @@ impl ChessEngine for SimpleEngine {
     }
 
     fn best_move(&mut self, params: SearchParams) -> Option<SearchResult> {
-        self.stop_flag.store(false, Ordering::Relaxed);
-
-        if self.search.is_none() {
-            let evaluator = Box::leak(Box::new(Evaluator::new()));
-            self.search = Some(Search::new(evaluator));
-        }
-
-        let search = self.search.as_mut().unwrap();
-        let depth = if params.depth > 0 { params.depth } else { 4 };
-
-        // Use iterative deepening if time limit is specified
-        let (best_move, evaluation, depth_reached) = if let Some(time_limit) = params.time_limit {
-            search.find_best_move_iterative(
-                params.state,
-                params.move_generator,
-                params.config_manager,
-                depth,
-                time_limit,
-            )?
-        } else {
-            search.find_best_move_with_depth(
-                params.state,
-                params.move_generator,
-                params.config_manager,
-                depth,
-            )?
-        };
-
-        let mate_in = if evaluation >= 999000 {
-            Some(((999999 - evaluation) / 2) as i32)
-        } else if evaluation <= -999000 {
-            Some(-((-999999 - evaluation) / 2) as i32)
-        } else {
-            None
-        };
-
-        Some(SearchResult {
-            best_move, // Changed to pass the whole struct
-            evaluation: Evaluation {
-                score: evaluation,
-                mate_in,
-            },
-            depth_reached,
-        })
+        let evaluator = Evaluator::new();
+        let mut tt = std::mem::take(&mut self.transposition_table);
+        let result = run_search(&evaluator, params, &self.parameters, &mut tt, 4);
+        self.transposition_table = tt;
+        result
     }
 
-    fn stop(&mut self) {
-        self.stop_flag.store(true, Ordering::Relaxed);
-    }
+    /// `Search` has no external cancellation hook — its only stopping
+    /// mechanisms are the hard/soft deadlines in
+    /// `find_best_move_iterative`. The old `stop_flag: Arc<AtomicBool>` was
+    /// write-only and has been removed rather than left as a lie.
+    fn stop(&mut self) {}
 
     fn reset_cache(&mut self) {
-        self.search = None;
+        self.transposition_table.clear();
+    }
+
+    fn parameter_definitions(&self) -> Option<&'static [ParameterDef]> {
+        Some(SEARCH_PARAMETER_DEFS)
+    }
+
+    fn get_parameters(&self) -> Option<EngineParameters> {
+        Some(self.parameters.clone())
+    }
+
+    fn set_parameters(&mut self, params: EngineParameters) -> bool {
+        let changed = self.parameters != params;
+        if changed {
+            self.parameters = params;
+            self.transposition_table.clear();
+        }
+        changed
     }
 }

@@ -2,16 +2,26 @@
 //
 // Off‑GUI‑thread engine execution.
 //
-// Two entry points:
-//   * spawn_engine_move   — run a single best_move() call on a worker
-//                           thread and hand the engine + result back.
-//   * spawn_tournament_game — play an entire game between two engine
-//                           types on a worker thread, streaming progress
-//                           snapshots and a final outcome.
+// Three entry points:
+//   * spawn_engine_move    — run a single best_move() call on a worker
+//                             thread and hand the engine + result back.
+//   * spawn_tournament_game — play an entire game between two *named*
+//                             engine types (built with default params
+//                             via EngineType::create()) on a worker
+//                             thread, streaming progress snapshots and a
+//                             final outcome.
+//   * spawn_param_game      — play an entire game between two
+//                             *already-constructed* engine instances.
+//                             This is what the parameter-evolution
+//                             tournament uses: every individual is the
+//                             same base EngineType with its own mutated
+//                             EngineParameters, so there's no single
+//                             EngineType value that identifies a side —
+//                             the caller builds the engine and hands it
+//                             over.
 //
 // Everything here is plain std::thread + std::sync::mpsc. The GUI polls
 // the receivers from its subscription tick; no async runtime coupling.
-
 use crate::core::DrawReason;
 use crate::core::board::Board;
 use crate::core::game_state::MateStatus;
@@ -21,19 +31,15 @@ use crate::engine::{ChessEngine, EngineType, GameController, SearchParams};
 use crate::move_generator::MoveGenerator;
 use crate::piece_config::PieceConfigManager;
 use crate::tournament::{GameOutcome, Termination};
-
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
-
 // ─────────────────────────────────────────────────────────────────────
 // Single‑move engine job
 // ─────────────────────────────────────────────────────────────────────
-
 /// What a single‑move worker sends back: the engine (so its transposition
 /// table / caches survive across moves) plus the search result.
 pub type EngineMoveResult = (Box<dyn ChessEngine>, Option<SearchResult>);
-
 pub fn spawn_engine_move(
     mut engine: Box<dyn ChessEngine>,
     mut state: GameState,
@@ -57,11 +63,9 @@ pub fn spawn_engine_move(
     });
     rx
 }
-
 // ─────────────────────────────────────────────────────────────────────
-// Tournament game worker
+// Tournament / evolution game worker
 // ─────────────────────────────────────────────────────────────────────
-
 /// Search settings snapshot, captured from the GameController at
 /// tournament start so every worker plays under identical conditions.
 /// Mirrors the budget logic in GameController::make_engine_move.
@@ -75,7 +79,6 @@ pub struct GameSearchSettings {
     pub black_time_respect: f32,
     pub unlimited_depth_with_time: bool,
 }
-
 impl GameSearchSettings {
     pub fn from_controller(c: &GameController) -> Self {
         Self {
@@ -88,7 +91,6 @@ impl GameSearchSettings {
             unlimited_depth_with_time: c.get_unlimited_depth_with_time(),
         }
     }
-
     /// Depth + time limit for `color`, applying time‑respect against the
     /// per‑game clocks. Same formula as GameController.
     fn budget_for(
@@ -124,7 +126,6 @@ impl GameSearchSettings {
         (d, adjusted)
     }
 }
-
 /// Enough state for the GUI to redraw the board mid‑game.
 pub struct DisplaySnapshot {
     pub board: Board,
@@ -132,7 +133,6 @@ pub struct DisplaySnapshot {
     pub last_move: Option<(Position, Position)>,
     pub plies: usize,
 }
-
 pub enum WorkerMsg {
     Progress(DisplaySnapshot),
     Done {
@@ -143,7 +143,8 @@ pub enum WorkerMsg {
         black_time: Duration,
     },
 }
-
+/// Play a game between two *named* engine types, each built with its
+/// default parameters.
 pub fn spawn_tournament_game(
     white_type: EngineType,
     black_type: EngineType,
@@ -156,9 +157,64 @@ pub fn spawn_tournament_game(
 ) -> mpsc::Receiver<WorkerMsg> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        run_tournament_game(
-            white_type,
-            black_type,
+        let white = white_type.create();
+        let black = black_type.create();
+        match (white, black) {
+            (Some(w), Some(b)) => {
+                run_game_loop(
+                    w,
+                    b,
+                    initial_state,
+                    &move_generator,
+                    &piece_config,
+                    &settings,
+                    max_plies,
+                    &cancel,
+                    &tx,
+                );
+            }
+            (None, Some(_)) => {
+                let _ = tx.send(WorkerMsg::Done {
+                    outcome: GameOutcome::BlackWins,
+                    termination: Termination::Forfeit,
+                    plies: 0,
+                    white_time: Duration::ZERO,
+                    black_time: Duration::ZERO,
+                });
+            }
+            _ => {
+                let _ = tx.send(WorkerMsg::Done {
+                    outcome: GameOutcome::WhiteWins,
+                    termination: Termination::Forfeit,
+                    plies: 0,
+                    white_time: Duration::ZERO,
+                    black_time: Duration::ZERO,
+                });
+            }
+        }
+    });
+    rx
+}
+/// Play a game between two *already-constructed* (and already
+/// parameterised) engine instances. Used by the parameter-evolution
+/// tournament, where both sides may be the same base `EngineType` with
+/// different `EngineParameters` — there's no single `EngineType` value
+/// that identifies either individual, so the caller builds the engines.
+pub fn spawn_param_game(
+    white_engine: Box<dyn ChessEngine>,
+    black_engine: Box<dyn ChessEngine>,
+    initial_state: GameState,
+    move_generator: Arc<MoveGenerator>,
+    piece_config: Arc<PieceConfigManager>,
+    settings: GameSearchSettings,
+    max_plies: usize,
+    cancel: Arc<AtomicBool>,
+) -> mpsc::Receiver<WorkerMsg> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        run_game_loop(
+            white_engine,
+            black_engine,
             initial_state,
             &move_generator,
             &piece_config,
@@ -170,10 +226,11 @@ pub fn spawn_tournament_game(
     });
     rx
 }
-
-fn run_tournament_game(
-    white_type: EngineType,
-    black_type: EngineType,
+/// Shared game loop: given two already-built engines, play until a
+/// result or cancellation, streaming progress and a final outcome.
+fn run_game_loop(
+    mut white: Box<dyn ChessEngine>,
+    mut black: Box<dyn ChessEngine>,
     mut state: GameState,
     mg: &MoveGenerator,
     pc: &PieceConfigManager,
@@ -182,59 +239,28 @@ fn run_tournament_game(
     cancel: &AtomicBool,
     tx: &mpsc::Sender<WorkerMsg>,
 ) {
-    let mut white = match white_type.create() {
-        Some(e) => e,
-        None => {
-            let _ = tx.send(WorkerMsg::Done {
-                outcome: GameOutcome::BlackWins,
-                termination: Termination::Forfeit,
-                plies: 0,
-                white_time: Duration::ZERO,
-                black_time: Duration::ZERO,
-            });
-            return;
-        }
-    };
-    let mut black = match black_type.create() {
-        Some(e) => e,
-        None => {
-            let _ = tx.send(WorkerMsg::Done {
-                outcome: GameOutcome::WhiteWins,
-                termination: Termination::Forfeit,
-                plies: 0,
-                white_time: Duration::ZERO,
-                black_time: Duration::ZERO,
-            });
-            return;
-        }
-    };
-
     let mut white_clock = Duration::ZERO;
     let mut black_clock = Duration::ZERO;
-
     loop {
         if cancel.load(Ordering::Relaxed) {
             return; // rx sees Disconnected → "cancelled, don't record"
         }
-
         if let Some((outcome, termination)) = check_game_over(&mut state, mg, pc, max_plies) {
             let _ = tx.send(WorkerMsg::Done {
                 outcome,
                 termination,
                 plies: state.move_history.len(),
-                white_time: white_clock,
-                black_time: black_clock,
+                            white_time: white_clock,
+                            black_time: black_clock,
             });
             return;
         }
-
         let color = state.current_turn;
         let (engine, my_clock, opp_clock) = match color {
             PieceColor::White => (&mut white, &mut white_clock, black_clock),
             PieceColor::Black => (&mut black, &mut black_clock, white_clock),
         };
         let (depth, time_limit) = settings.budget_for(color, *my_clock, opp_clock);
-
         let t0 = Instant::now();
         let result = engine.best_move(SearchParams {
             state: &mut state,
@@ -244,7 +270,6 @@ fn run_tournament_game(
             time_limit,
         });
         *my_clock += t0.elapsed();
-
         match result {
             Some(r) => {
                 state.clear_redo();
@@ -252,14 +277,14 @@ fn run_tournament_game(
                 if tx
                     .send(WorkerMsg::Progress(DisplaySnapshot {
                         board: state.board.clone(),
-                        current_turn: state.current_turn,
-                        last_move: Some((r.best_move.from, r.best_move.to)),
-                        plies: state.move_history.len(),
+                                              current_turn: state.current_turn,
+                                              last_move: Some((r.best_move.from, r.best_move.to)),
+                                              plies: state.move_history.len(),
                     }))
                     .is_err()
-                {
-                    return;
-                }
+                    {
+                        return;
+                    }
             }
             None => {
                 let outcome = match color {
@@ -270,15 +295,14 @@ fn run_tournament_game(
                     outcome,
                     termination: Termination::Forfeit,
                     plies: state.move_history.len(),
-                    white_time: white_clock,
-                    black_time: black_clock,
+                                white_time: white_clock,
+                                black_time: black_clock,
                 });
                 return;
             }
         }
     }
 }
-
 /// Classify the position. Returns both the ELO‑relevant outcome and the
 /// diagnostic termination reason.
 fn check_game_over(
@@ -290,7 +314,6 @@ fn check_game_over(
     if state.move_history.len() >= max_plies {
         return Some((GameOutcome::AdjudicatedDraw, Termination::PlyLimit));
     }
-
     // make_move → check_draw_conditions may already have flagged a
     // rule‑based draw. Stalemate is *not* set there (that's mate‑status
     // territory), but handle it anyway for robustness.
@@ -300,10 +323,10 @@ fn check_game_over(
             DrawReason::Repetition => Termination::Repetition,
             DrawReason::InsufficientMaterial => Termination::InsufficientMaterial,
             DrawReason::Stalemate => Termination::Stalemate,
+            DrawReason::MutualElimination => Termination::MutualElimination,
         };
         return Some((GameOutcome::Draw, t));
     }
-
     let stm = state.current_turn;
     match state.get_mate_status(mg, pc) {
         MateStatus::Checkmate => {
