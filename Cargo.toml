@@ -1,7 +1,7 @@
 # Cargo.toml
 [package]
 name = "fairy_chess_gui"
-version = "1.0.8"
+version = "1.0.8.0"
 edition = "2024"
 authors = ["Peter Smythe <Pds3.14@gmail.com>"]
 repository = "https://github.com/Pds314/Fairy_Chess_GUI"

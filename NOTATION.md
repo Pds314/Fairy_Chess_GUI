@@ -3,98 +3,122 @@
 Piece rules in this engine are defined using a custom text syntax located in `.pieces` configuration files. Whitespace is ignored everywhere except in names.
 
 ## Piece Configuration Format
-Each piece is defined on a single line terminated by a semicolon (`;`). The line is split into 5 sections separated by forward slashes (`/`):
 
-1. **Display Name**: A name to use for display purposes if needed.
+Each piece is defined on a single line terminated by a semicolon (`;`). The line is split into exactly 5 sections separated by forward slashes (`/`):
+
+1. **Display Name**: A name to use for display purposes (e.g., in the GUI or analysis).
 2. **Texture Names**: A comma-separated list of texture filenames to look for in `assets/pieces/` to render that piece. Priority is top-to-bottom/left-to-right.
-3. **Characters**: A character or short string used to identify the piece in case no texture is available or for terminal rendering.
+3. **Characters**: A character or short string used to identify the piece in PGN notation, FEN strings, or terminal rendering.
 4. **Moveset**: The core movement logic string (detailed below).
 5. **Properties**: Global boolean properties for the piece.
 
-### Example
-```text
-Knight / knight, horse / N / +x / p;
-```
+> **Example:**
+> `Knight / knight, horse / N / +x / p;`
 
 ---
 
-## 1. The Moveset String (Section 4)
+## The Moveset String (Section 4)
 
-A moveset is a string defining how a piece moves. The `,` character indicates that a piece has one or more additional move patterns. For example, `+*,x*` is a queen move; the comma terminates the existing Rook (`+*`) pattern and starts the Bishop (`x*`) pattern.
+A moveset is a string defining how a piece moves. The `,` character indicates that a piece has one or more additional move patterns (e.g., `+*,x*` defines a Queen by combining Rook and Bishop patterns). 
 
-Each pattern is composed of "steps", which are built using directional prefixes, a base shape, and modifying suffixes.
+Each pattern is composed of sequential "steps". Steps are built using directional prefixes, a base shape, step modifiers, and overall pattern modifiers.
 
 ### Base Shapes
-* `+` : All outward orthogonal submoves.
-* `x` : All outward diagonal submoves.
+* `+` : Orthogonal movement (up, down, left, right).
+* `x` : Diagonal movement.
+* `?` : A special "null" or "pass" move. Can only be used by itself (e.g., `?`) to allow a piece to skip its turn.
 
-### Directional Prefixes (Restrictors)
-These prefixes combine additively to restrict the direction of a submove.
+### Directional & Modifier Prefixes (Step-Level)
+These prefixes apply to the immediate step and restrict or modify its vector. They combine additively.
 * `^` : Forward
 * `v` : Backward
 * `<` : Left
 * `>` : Right
-* `-` : Subtractive modifier. Removes instead of adds a direction. For example, `-v+` means all orthogonal directions *except* backward.
-* `Number` : A number prefixing a shape specifies the exact step distance in that direction. For example, `2+*` would be a sliding piece that only goes even distances. `2+` is exactly two squares orthogonally.
+* `-` : Subtractive modifier. Removes instead of adds a direction. (e.g., `-v+` means all orthogonal directions *except* backward).
+* `=` : Direction lock. Forces the step to continue in the exact same vector as the previous step.
+* `Number` : Limits the exact step distance in that direction. (e.g., `2+` moves exactly two squares orthogonally).
 
 **Chaining Submoves:**
-You can chain modifiers to create complex paths.
-* `^+x` : Moves a square forward, and then along any outward diagonal. This allows the two most forward knight moves.
-* `^x+` : Moves diagonally forward, and then outward orthogonally. This allows the four forward knight moves.
-* `2+x` or `x2+` : Moves in a 3x1 "L" shape (like a Camel) instead of the standard 2x1 Knight move.
+You can chain steps to create complex paths.
+* `^+x` : Moves one square forward orthogonally, then one square along any outward diagonal (the two forward-most Knight moves).
+* `^x+` : Moves diagonally forward, then outward orthogonally (the four forward Knight moves).
+* `2+x` : Moves in a 3x1 "L" shape (like a Camel).
 
-### Suffixes (Modifiers)
-Suffixes affect the move up to that point.
+---
+
+### Step Suffixes (Modifiers)
+These suffixes are applied immediately after a step and dictate how that specific step behaves in sequence.
 
 **Repetition & Stopping:**
-* `*` : The move may optionally be repeated in the same direction across empty squares (e.g., `x*` is a Bishop).
-* `*N` : A number after `*` restricts the maximum repetitions (e.g., `^+*2` means a move restricted to one or two steps straight forward).
-* `?` : Optional stop. The piece may optionally stop here instead of doing any more submoves (passing its turn if it stops on its own square, e.g., `?+`).
-* `#` : Resets the "center" of what counts as an outward move for the next submove.
-* `=` : Direction lock. Forces the step to continue in the exact same vector as the previous step.
+* `*` : The step may optionally be repeated in the same direction across valid squares (e.g., `x*` is a sliding Bishop).
+* `*N` : A number after `*` restricts the maximum repetitions (e.g., `^+*2` means move one or two steps straight forward).
+* `?` : Optional stop. The piece may optionally stop at this step instead of continuing the chain.
+* `#` : Resets the "center" of what counts as an outward move for the next sub-step.
 
-**Permissions (Collisions):**
-By default, non-terminal submoves require empty squares (`_!@`), non-terminal repetitions require empty squares (`_`), and the move overall can land on empty squares or enemy pieces (`_!`). You can override this:
-* `_` : Can land on/go through empty squares.
-* `!` : Can land on/go through enemy pieces.
-* `@` : Can land on/go through friendly pieces.
+**Ghost Markers (Transit Aliases):**
+A ghost marker leaves an invisible "ghost" on the square the step **departed from**. This ghost points to the piece's final destination. Royalty projection is derived from the piece, never the ghost. Markers compose (e.g., `E&`).
+* `e` : **Restricted Capture Alias** (`CAPTURE_EP`). Only movers with the `~` trait may capture the piece by landing on this departed square (En Passant).
+* `E` : **Open Capture Alias** (`CAPTURE_OPEN`). Any capture-capable mover may capture the piece by landing on this square.
+* `&` : **Castle Target** (`CASTLE_TARGET`). A castling partner (Rook) may land on this departed square. This is required to assert castling transit validity.
+* `'` : **Bare Transit Ghost**. Has no capture behavior of its own, but projects royalty if its owner is royal. Used to enforce "cannot castle through check".
 
-*Note: Suffixing `!` with a specific piece character in braces (e.g., `!{K}`) acts as a **Capture Filter**, allowing the piece to only capture that specific piece type.*
+**Flight Captures (Capturing in passing):**
+Allows a piece to capture pieces it passes over without stopping.
+* `%` or `%!` : Captures enemy pieces in flight.
+* `%@` : Captures friendly pieces in flight.
+
+**Step Pass Permissions:**
+By default, intermediate steps require empty squares. You can override what a piece is allowed to pass through or land on during a step:
+* `_` : Can pass through empty squares.
+* `!` : Can pass through enemy pieces.
+* `@` : Can pass through friendly pieces.
+*(Note: If a step has `*`, you can specify pass permissions specifically for the repetitions by appending them after the `*`, e.g., `*!`).*
+
+---
+
+### Pattern-Level Suffixes
+These suffixes are applied at the very end of a move pattern and govern the final landing rules and overall behavior of the move.
+
+**Final Landing Permissions:**
+If unspecified, a pattern can land on empty squares or enemy pieces. Adding any of these overrides the default:
+* `_` : Can land on empty squares.
+* `!` : Can land on enemy pieces.
+* `@` : Can land on friendly pieces.
+* `!{Piece}` : **Capture Filter**. Suffixing `!` with a piece's exact character or name in braces (e.g., `!{K}`) means this pattern can *only* capture that specific piece type.
 
 **Special Mechanics:**
-* `~` : This move captures *en passant*.
-* `e` : The piece may be captured here *en passant* if the attacker can capture en passant.
-* `E` : The piece can be captured here by *en passant* regardless of whether the attacker normally has the en passant trait.
-* `u` : Unmoved requirement. This move can only be made by an unmoved piece.
-* `i` : Irreversible. This move resets the fifty-move rule without needing to capture.
-* `o` : King-side castling move. Creates intermediate squares where the rook can move to.
-* `O` : Rook-side castling move. Moves to an available castling square simultaneously with the king.
-* `&` : Castling partner landing marker. Specifies the exact square the partner piece (Rook) must land on during a castling maneuver.
+* `u` : Requires the piece to be unmoved.
+* `i` : Irreversible. Moving with this pattern resets the fifty-move rule.
+* `~` : This move can capture *en passant* (allows capturing `e` ghosts).
+* `o` : King-side castle. Used in conjunction with `&` ghosts to validate partner transits.
+* `O` : Rook-side castle.
 
 **Zones:**
-You can restrict a pattern to only trigger if starting in, or landing in, a defined board zone.
-* `[zone_name]` at the **start** of a pattern requires the piece to start in that zone.
+You can restrict a pattern based on board zones defined in the `.game` file.
+* `[zone_name]` at the **start** of a pattern requires the piece to depart from that zone.
 * `[zone_name]` at the **end** of a pattern requires the piece to land in that zone.
 
 ---
 
-## 2. Piece Properties (Section 5)
+## Piece Properties (Section 5)
 
-Properties define the high-level game logic associated with the piece. They are defined as a `/` separated list.
+Properties define the high-level game logic associated with the piece. They are defined as a `/` separated string of characters.
 
-* `R` (Royal): Cannot move into check. Checkmating any piece with this property ends the game.
-* `r` (Royalty target): Capturing all instances of pieces with this property ends the game.
-* `P` (Promoter): This piece may promote.
-* `p` (Promotion target): This piece is allowed to be promoted to.
+* `R` (Royal): This piece cannot move into check, and checkmating it ends the game.
+* `r` (Royalty target): These pieces are collectively protected. Capturing the *last* instance of an `r` piece ends the game.
+* `P` (Promoter): This piece may promote when entering a defined promotion zone.
+* `p` (Promotion target): This piece is allowed to be promoted into.
 
 ---
 
-## Examples of Standard Pieces
+## Standard Pieces Example
+
+This is how standard Chess pieces are mapped using the DSL, taking full advantage of the ghost framework and irreversibility rules:
+
 ```text
 Knight : Knight / knight, horse / N / +x / p;
-Rook   : Rook / rook, castle, tower, wazir, fortress / R, WW / +*, +*Ou / p;
-Bishop : Bishop / bishop, elephant, ferz / B, FF / x* / p;
-King   : King / king, mann, man, crown, lord, commoner / K, WF, M / +,x,<>+E_<>+E_ou / R;
-Queen  : Queen / queen, lady, crown, ferz, princess, empress / Q, KK, WWFF / +*,x* / p;
-Pawn   : Pawn / pawn, soldier, man, commoner / P / ^x!~,^+_,^+_^+e_u / P;
-```
+Rook   : Rook / rook, castle, tower / R / +*, +*Ou / p;
+Bishop : Bishop / bishop, elephant / B / x* / p;
+King   : King / king, mann / K / +, x, <>+E_<>+E_ou / R;
+Queen  : Queen / queen, lady / Q / +*, x* / p;
+Pawn   : Pawn / pawn, soldier / P / ^x!~i, ^+_i, ^+_^+e_ui / P;
